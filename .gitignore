@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+tdl_home/.tdl/
+downloads/
+.venv/
+venv/
+*.log
+*.log.gz
+tdl-quick-export*.json

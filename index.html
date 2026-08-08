@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tdl - Telegram 下载工具</title>
+<style>
+:root {
+  --bg: #f5f7fb;
+  --side: #ffffff;
+  --panel: #ffffff;
+  --input: #ffffff;
+  --hover: #f1f5f9;
+  --text: #1f2937;
+  --muted: #64748b;
+  --dim: #94a3b8;
+  --accent: #1686c7;
+  --accent-hover: #0f75b3;
+  --accent-soft: rgba(22, 134, 199, .12);
+  --border: #d8e1ec;
+  --ok: #16803c;
+  --bad: #d64545;
+  --warn: #b7791f;
+  --radius: 6px;
+  --mono: "Cascadia Code", "Consolas", monospace;
+  --sans: -apple-system, "Segoe UI", system-ui, "Microsoft YaHei", sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { height: 100vh; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+.app { display: grid; grid-template-columns: 210px 1fr; grid-template-rows: 1fr 230px; grid-template-areas: "side main" "side console"; height: 100vh; }
+.sidebar { grid-area: side; background: var(--side); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+.logo { padding: 18px 16px 14px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 17px; }
+.logo span { color: var(--accent); }
+.nav { padding: 8px 0; flex: 1; }
+.nav button { width: 100%; text-align: left; padding: 10px 16px; color: var(--muted); background: none; border: 0; cursor: pointer; font: inherit; }
+.nav button:hover { background: var(--hover); color: var(--text); }
+.nav button.active { background: var(--accent-soft); color: var(--accent); border-left: 3px solid var(--accent); padding-left: 13px; }
+.status { border-top: 1px solid var(--border); padding: 12px 16px; color: var(--muted); font-size: 12px; }
+.status-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+.dot.ok { background: var(--ok); }
+.dot.run { background: var(--warn); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .35; } }
+.main { grid-area: main; overflow: auto; padding: 24px 28px; }
+.tab { display: none; max-width: 820px; }
+.tab.active { display: block; }
+.title { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+.desc { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .05); }
+.card-title { font-weight: 700; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.field { margin-bottom: 14px; }
+label, .label { display: block; color: var(--muted); font-weight: 700; font-size: 12px; margin-bottom: 6px; }
+.hint { color: var(--dim); font-size: 12px; margin-top: 5px; }
+.row { display: flex; gap: 12px; }
+.row .field { flex: 1; }
+input, textarea, select { width: 100%; padding: 9px 11px; background: var(--input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+textarea { min-height: 86px; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 18px; background: var(--accent); color: white; border: 0; border-radius: 4px; cursor: pointer; font-weight: 700; }
+.btn:hover { background: var(--accent-hover); }
+.btn.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+.btn.danger { background: var(--bad); }
+.btn.small { padding: 5px 11px; font-size: 12px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.segment { display: inline-flex; border: 1px solid var(--border); background: var(--input); border-radius: 4px; overflow: hidden; margin-bottom: 10px; }
+.segment button { padding: 8px 14px; background: none; border: 0; color: var(--muted); cursor: pointer; }
+.segment button.active { background: var(--accent); color: white; }
+.check { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--text); font-weight: 400; }
+.check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.chip:hover { color: var(--accent); border-color: var(--accent); }
+.collapse { display: none; margin-top: 10px; }
+.collapse.open { display: block; }
+.chat-table-wrap { max-height: 430px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--muted); background: #f8fafc; position: sticky; top: 0; }
+tr:hover td { background: var(--hover); cursor: pointer; }
+tr.selected td { background: var(--accent-soft); }
+.badge { display: inline-block; padding: 2px 7px; border-radius: 3px; background: #e8eef6; color: #475569; font-size: 11px; }
+.selected-chat { display: flex; align-items: center; gap: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 4px; padding: 9px 12px; margin-bottom: 16px; }
+.selected-chat button { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 18px; }
+.console { grid-area: console; background: #ffffff; border-top: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: 0 -1px 2px rgba(15, 23, 42, .04); }
+.console.collapsed { height: 36px; }
+.console-head { height: 36px; display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border-bottom: 1px solid var(--border); padding: 0 12px; color: var(--muted); font-size: 12px; }
+.console-actions { display: flex; gap: 6px; }
+.console-actions button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 3px 7px; }
+.console-body { flex: 1; overflow: auto; padding: 9px 13px; font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; }
+.line.error { color: var(--bad); }
+.line.success { color: var(--ok); }
+.line.info { color: var(--accent); }
+.line.cmd { color: var(--warn); font-style: italic; }
+.line.system { color: var(--dim); }
+.console-input { display: flex; gap: 6px; padding: 7px 12px; border-top: 1px solid var(--border); background: #f8fafc; }
+.console-input input { font-family: var(--mono); font-size: 12px; }
+.toast { position: fixed; right: 16px; top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; z-index: 99; max-width: 360px; }
+.toast.success { border-color: var(--ok); }
+.toast.error { border-color: var(--bad); }
+@media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr 230px; grid-template-areas: "side" "main" "console"; } .sidebar { max-height: 190px; } .nav { display: flex; flex-wrap: wrap; } .nav button { width: auto; } .row { flex-direction: column; gap: 0; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">tdl <span>可视化工具</span></div>
+    <nav class="nav">
+      <button data-tab="login">登录</button>
+      <button data-tab="chats">聊天列表</button>
+      <button class="active" data-tab="download">下载</button>
+      <button data-tab="export">导出</button>
+      <button data-tab="forward">转发</button>
+      <button data-tab="upload">上传</button>
+      <button data-tab="users">用户导出</button>
+      <button data-tab="settings">设置</button>
+    </nav>
+    <div class="status">
+      <div class="status-row"><span id="login-dot" class="dot"></span><span id="login-text">检查中...</span></div>
+      <div class="status-row"><span id="task-dot" class="dot"></span><span id="task-text">空闲</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section id="tab-login" class="tab">
+      <div class="title">登录</div>
+      <div class="desc">登录 Telegram 账号。桌面客户端模式会复用官方客户端会话，通常最省事。</div>
+      <div class="card">
+        <div class="field">
+          <span class="label">登录方式</span>
+          <div id="login-type-seg" class="segment">
+            <button class="active" data-val="desktop">桌面客户端</button>
+            <button data-val="code">验证码</button>
+            <button data-val="qr">二维码</button>
+          </div>
+        </div>
+        <div id="login-desktop-opts">
+          <div class="field">
+            <label>Telegram Desktop 路径（可选）</label>
+            <input id="login-desktop-path" class="mono" placeholder="留空则自动检测">
+            <div class="hint">Telegram Desktop 数据目录路径。留空时 tdl 会自行查找。</div>
+          </div>
+          <div class="field">
+            <label>本地锁密码（可选）</label>
+            <input id="login-passcode" type="password" class="mono" placeholder="没有密码则留空">
+          </div>
+        </div>
+        <div id="login-code-opts" class="hint" style="display:none;margin-bottom:12px;">启动后按控制台提示输入手机号、验证码等内容。</div>
+        <div id="login-qr-opts" class="hint" style="display:none;margin-bottom:12px;">二维码会显示在控制台里，用 Telegram 扫码即可。</div>
+        <button class="btn" onclick="doLogin()">开始登录</button>
+      </div>
+    </section>
+
+    <section id="tab-chats" class="tab">
+      <div class="title">聊天列表</div>
+      <div class="desc">列出账号中的群组、频道和私聊。点击某一行后，会自动填入导出和快速下载。</div>
+      <div id="selected-chat-display"></div>
+      <div class="card">
+        <div class="field">
+          <label>过滤表达式（可选）</label>
+          <input id="chat-filter" class="mono" placeholder="true">
+          <div class="chips">
+            <span class="chip" onclick="setVal('chat-filter','true')">全部</span>
+            <span class="chip" onclick="setVal('chat-filter','len(.Title) > 0')">有标题</span>
+          </div>
+        </div>
+        <button class="btn" onclick="listChats()">列出聊天</button>
+      </div>
+      <div id="chat-results" class="card" style="display:none;">
+        <div class="card-title">聊天列表 <span id="chat-count" style="color:var(--muted);font-weight:400;"></span></div>
+        <div class="field"><input id="chat-search" placeholder="搜索名称或 ID" oninput="filterChats()"></div>
+        <div class="chat-table-wrap">
+          <table>
+            <thead><tr><th>名称</th><th>显示名称</th><th>类型</th><th>ID</th><th>用户名</th></tr></thead>
+            <tbody id="chat-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-download" class="tab active">
+      <div class="title">下载</div>
+      <div class="desc">直接下载消息链接中的文件，或先导出聊天消息再下载其中的媒体文件。</div>
+      <div id="dl-selected-chat"></div>
+      <div class="card">
+        <div class="card-title">下载来源</div>
+        <div id="dl-mode-seg" class="segment">
+          <button class="active" data-val="url">消息链接</button>
+          <button data-val="file">导出文件</button>
+          <button data-val="quick">导出并下载</button>
+        </div>
+        <div id="dl-url-mode">
+          <div class="field"><label>Telegram 消息链接</label><textarea id="dl-urls" placeholder="https://t.me/channel/123&#10;https://t.me/c/1234567890/456&#10;每行一个链接"></textarea></div>
+        </div>
+        <div id="dl-file-mode" style="display:none;">
+          <div class="field"><label>导出的 JSON 文件</label><textarea id="dl-files" class="mono" placeholder="tdl-export.json&#10;每行一个路径"></textarea><div class="hint">这里填写 Export 页面或 tdl chat export 生成的 JSON 文件。</div></div>
+        </div>
+        <div id="dl-quick-mode" style="display:none;">
+          <div class="field"><label>聊天（ID 或用户名）</label><input id="dl-quick-chat" class="mono" placeholder="例如 my_channel 或 -1001234567890"><div class="hint">留空表示 Saved Messages。可先去聊天列表页选择。</div></div>
+          <div class="row">
+            <div class="field"><label>导出类型</label><select id="dl-quick-type" onchange="toggleQuickType()"><option value="last">最近 N 条消息</option><option value="time">按日期范围</option><option value="id">按消息 ID 范围</option></select></div>
+            <div class="field" id="dl-quick-input-field"><label id="dl-quick-input-label">数量</label><input id="dl-quick-input" class="mono" placeholder="100"></div>
+          </div>
+          <div class="row" id="dl-quick-date-row" style="display:none;">
+            <div class="field"><label>开始日期</label><input id="dl-quick-start" type="datetime-local"></div>
+            <div class="field"><label>结束日期</label><input id="dl-quick-end" type="datetime-local"></div>
+          </div>
+          <div class="field"><label>过滤条件（可选）</label><input id="dl-quick-filter" class="mono" placeholder="true"><div class="chips"><span class="chip" onclick="setVal('dl-quick-filter','true')">全部</span><span class="chip" onclick="setVal('dl-quick-filter','.File != nil')">包含文件</span><span class="chip" onclick="setVal('dl-quick-filter','.Media.Type == &quot;photo&quot;')">仅图片</span><span class="chip" onclick="setVal('dl-quick-filter','.Media.Type == &quot;video&quot;')">仅视频</span></div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">下载选项</div>
+        <div class="row">
+          <div class="field"><label>下载目录</label><input id="dl-dir" class="mono" placeholder="downloads"></div>
+          <div class="field"><label>并发任务数</label><input id="dl-limit" type="number" min="1" value="2"></div>
+          <div class="field"><label>单文件线程数</label><input id="dl-threads" type="number" min="1" value="4"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>只包含扩展名</label><input id="dl-include" class="mono" placeholder="mp4,mp3（留空表示全部）"></div>
+          <div class="field"><label>排除扩展名</label><input id="dl-exclude" class="mono" placeholder="png,jpg"></div>
+        </div>
+        <div class="field"><label>文件名模板</label><input id="dl-template" class="mono" placeholder="{{ .DialogID }}_{{ .MessageID }}_{{ filenamify .FileName }}"></div>
+        <button class="btn secondary small" onclick="toggleCollapse('dl-adv')">高级选项</button>
+        <div id="dl-adv" class="collapse">
+          <label class="check"><input id="dl-group" type="checkbox">自动检测媒体组</label>
+          <label class="check"><input id="dl-desc" type="checkbox">从新到旧下载</label>
+          <label class="check"><input id="dl-skip-same" type="checkbox">跳过同名且同大小文件</label>
+          <label class="check"><input id="dl-rewrite-ext" type="checkbox">按文件头 MIME 重写扩展名</label>
+          <label class="check"><input id="dl-takeout" type="checkbox">使用 takeout 会话</label>
+          <label class="check"><input id="dl-continue" type="checkbox">继续上次下载</label>
+          <label class="check"><input id="dl-restart" type="checkbox">重新开始上次下载</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" onclick="doDownload()">开始下载</button>
+        <button class="btn secondary" onclick="continueLastDownload()">继续上次下载</button>
+        <button class="btn secondary" onclick="restartLastDownload()">重新开始上次下载</button>
+      </div>
+      <div class="hint">继续下载需要保留上次相同的消息链接或导出 JSON 文件，并使用同一个下载目录。</div>
+    </section>
+
+    <section id="tab-export" class="tab">
+      <div class="title">导出</div>
+      <div class="desc">将聊天消息导出为 JSON 文件，可用于下载或备份。</div>
+      <div id="exp-selected-chat"></div>
+      <div class="card">
+        <div class="row">
+          <div class="field"><label>聊天（ID 或用户名）</label><input id="exp-chat" class="mono" placeholder="留空表示 Saved Messages"></div>
+          <div class="field"><label>导出类型</label><select id="exp-type" onchange="toggleExpType()"><option value="time">按日期范围</option><option value="id">按消息 ID</option><option value="last">最近 N 条消息</option></select></div>
+        </div>
+        <div id="exp-time-opts" class="row"><div class="field"><label>开始日期</label><input id="exp-start" type="datetime-local"></div><div class="field"><label>结束日期</label><input id="exp-end" type="datetime-local"></div></div>
+        <div id="exp-id-opts" class="row" style="display:none;"><div class="field"><label>起始消息 ID</label><input id="exp-id-start" type="number" class="mono" placeholder="1"></div><div class="field"><label>结束消息 ID</label><input id="exp-id-end" type="number" class="mono" placeholder="1000"></div></div>
+        <div id="exp-last-opts" style="display:none;"><div class="field"><label>数量</label><input id="exp-last-count" type="number" min="1" value="100" class="mono"></div></div>
+        <div class="field"><label>过滤条件（可选）</label><input id="exp-filter" class="mono" placeholder="true"><div class="chips"><span class="chip" onclick="setVal('exp-filter','true')">全部</span><span class="chip" onclick="setVal('exp-filter','.File != nil')">包含文件</span><span class="chip" onclick="setVal('exp-filter','.Media.Type == &quot;photo&quot;')">图片</span><span class="chip" onclick="setVal('exp-filter','.Media.Type == &quot;video&quot;')">视频</span><span class="chip" onclick="setVal('exp-filter','.Media.Type == &quot;document&quot;')">文档</span></div></div>
+        <div class="field"><label>输出文件</label><input id="exp-output" class="mono" value="tdl-export.json"></div>
+        <button class="btn secondary small" onclick="toggleCollapse('exp-adv')">高级选项</button>
+        <div id="exp-adv" class="collapse">
+          <label class="check"><input id="exp-all" type="checkbox">包含非媒体消息</label>
+          <label class="check"><input id="exp-content" type="checkbox">导出消息文本内容</label>
+          <label class="check"><input id="exp-raw" type="checkbox">导出原始 MTProto 结构</label>
+          <div class="row"><div class="field"><label>话题 ID（可选）</label><input id="exp-topic" type="number" class="mono"></div><div class="field"><label>回复帖子 ID（可选）</label><input id="exp-reply" type="number" class="mono"></div></div>
+        </div>
+      </div>
+      <button class="btn" onclick="doExport()">导出消息</button>
+    </section>
+
+    <section id="tab-forward" class="tab">
+      <div class="title">转发</div>
+      <div class="desc">把消息链接或导出 JSON 中的消息转发到目标聊天。</div>
+      <div class="card">
+        <div class="field"><label>来源（链接或 JSON 文件，每行一个）</label><textarea id="fwd-from" class="mono" placeholder="https://t.me/channel/123&#10;tdl-export.json"></textarea></div>
+        <div class="field"><label>目标聊天</label><input id="fwd-to" class="mono" placeholder="聊天 ID 或用户名"></div>
+        <div class="field"><label>模式</label><select id="fwd-mode"><option value="direct">直接转发（保留来源）</option><option value="clone">克隆发送（不带来源）</option></select></div>
+        <button class="btn secondary small" onclick="toggleCollapse('fwd-adv')">高级选项</button>
+        <div id="fwd-adv" class="collapse">
+          <label class="check"><input id="fwd-desc" type="checkbox">反向顺序</label>
+          <label class="check"><input id="fwd-dry-run" type="checkbox">试运行（仅预览）</label>
+          <label class="check"><input id="fwd-silent" type="checkbox">静默发送</label>
+          <label class="check"><input id="fwd-single" type="checkbox">不自动检测媒体组</label>
+          <div class="field"><label>编辑表达式（可选）</label><input id="fwd-edit" class="mono" placeholder="用于编辑消息或说明文字的表达式"></div>
+        </div>
+      </div>
+      <button class="btn" onclick="doForward()">开始转发</button>
+    </section>
+
+    <section id="tab-upload" class="tab">
+      <div class="title">上传</div>
+      <div class="desc">上传文件或目录到 Telegram 聊天。</div>
+      <div class="card">
+        <div class="field"><label>文件/目录路径（每行一个）</label><textarea id="up-paths" class="mono" placeholder="C:\path\to\file.mp4&#10;C:\path\to\directory"></textarea></div>
+        <div class="row"><div class="field"><label>目标聊天</label><input id="up-chat" class="mono" placeholder="留空表示 Saved Messages"></div><div class="field"><label>话题 ID</label><input id="up-topic" type="number" class="mono"></div></div>
+        <div class="row"><div class="field"><label>只包含扩展名</label><input id="up-include" class="mono" placeholder="mp4,mp3"></div><div class="field"><label>排除扩展名</label><input id="up-exclude" class="mono" placeholder="png,jpg"></div></div>
+        <button class="btn secondary small" onclick="toggleCollapse('up-adv')">高级选项</button>
+        <div id="up-adv" class="collapse">
+          <label class="check"><input id="up-photo" type="checkbox">图片按照片上传</label>
+          <label class="check"><input id="up-rm" type="checkbox">上传后删除本地文件</label>
+          <div class="field"><label>说明文字（可选）</label><input id="up-caption" class="mono" placeholder="留空使用 tdl 默认说明文字"></div>
+        </div>
+      </div>
+      <button class="btn" onclick="doUpload()">开始上传</button>
+    </section>
+
+    <section id="tab-users" class="tab">
+      <div class="title">用户导出</div>
+      <div class="desc">从频道或超级群组导出用户（成员/订阅者）到 JSON 文件。</div>
+      <div class="card">
+        <div class="row"><div class="field"><label>聊天（域名或 ID）</label><input id="users-chat" class="mono" placeholder="channel_username"></div><div class="field"><label>输出文件</label><input id="users-output" class="mono" value="tdl-users.json"></div></div>
+        <label class="check"><input id="users-raw" type="checkbox">导出原始 MTProto 结构</label>
+      </div>
+      <button class="btn" onclick="doUsers()">导出用户</button>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <div class="title">设置</div>
+      <div class="desc">配置 tdl 程序路径、home 目录、代理和默认下载参数。</div>
+      <div class="card">
+        <div class="field"><label>tdl.exe 路径</label><input id="cfg-tdl-path" class="mono"></div>
+        <div class="field"><label>tdl Home 目录（USERPROFILE）</label><input id="cfg-tdl-home" class="mono"><div class="hint">会话数据保存在 &lt;home&gt;\.tdl\data。修改后需要重新登录。</div></div>
+        <div class="row"><div class="field"><label>命名空间</label><input id="cfg-namespace" class="mono" value="default"></div><div class="field"><label>代理</label><input id="cfg-proxy" class="mono" placeholder="protocol://user:pass@host:port"></div></div>
+        <div class="row"><div class="field"><label>DC 池大小</label><input id="cfg-pool" type="number" min="0" value="8"></div><div class="field"><label>默认并发任务数</label><input id="cfg-limit" type="number" min="1" value="2"></div><div class="field"><label>默认单文件线程数</label><input id="cfg-threads" type="number" min="1" value="4"></div></div>
+        <div class="row"><div class="field"><label>默认下载目录</label><input id="cfg-download-dir" class="mono" value="downloads"></div><div class="field"><label>服务端口</label><input id="cfg-port" type="number" min="1024" max="65535" value="8765"></div></div>
+      </div>
+      <button class="btn" onclick="saveSettings()">保存设置</button>
+      <span id="settings-saved" style="display:none;color:var(--ok);margin-left:12px;">已保存</span>
+      <div class="card" style="margin-top:18px;"><div class="card-title">tdl 版本</div><pre id="version-info" class="mono" style="color:var(--muted);white-space:pre-wrap;">加载中...</pre></div>
+    </section>
+  </main>
+
+  <section id="console" class="console">
+    <div class="console-head">
+      <div>控制台 <span id="console-task-label" style="color:var(--accent);"></span></div>
+      <div class="console-actions"><button onclick="clearConsole()">清空</button><button onclick="toggleConsole()">折叠</button></div>
+    </div>
+    <div id="console-body" class="console-body"><div class="line system">控制台已就绪。启动任务后会在这里显示输出。</div></div>
+    <div class="console-input"><input id="console-input" placeholder="给正在运行的任务输入内容，然后按回车..." onkeydown="if(event.key==='Enter')sendInput()"><button class="btn small" onclick="sendInput()">发送</button><button class="btn small danger" onclick="stopTask()">停止</button></div>
+  </section>
+</div>
+
+<script>
+let config = {};
+let currentTaskId = null;
+let currentEventSource = null;
+let selectedChat = null;
+let chatData = [];
+
+function $(id) { return document.getElementById(id); }
+function val(id) { return $(id) ? $(id).value.trim() : ''; }
+function setVal(id, value) { if ($(id)) $(id).value = value; }
+function checked(id) { return $(id) ? $(id).checked : false; }
+function splitLines(text) { return String(text || '').split('\n').map(s => s.trim()).filter(Boolean); }
+function toast(message, type) { const t = document.createElement('div'); t.className = 'toast ' + (type || ''); t.textContent = message; document.body.appendChild(t); setTimeout(() => t.remove(), 3000); }
+function toggleCollapse(id) { const el = $(id); if (el) el.classList.toggle('open'); }
+function getSeg(id) { const active = $(id).querySelector('button.active'); return active ? active.dataset.val : null; }
+
+function appendConsole(text, cls) { const div = document.createElement('div'); div.className = 'line ' + (cls || ''); div.textContent = text; $('console-body').appendChild(div); $('console-body').scrollTop = $('console-body').scrollHeight; }
+function clearConsole() { $('console-body').innerHTML = ''; }
+function toggleConsole() { $('console').classList.toggle('collapsed'); }
+function setTaskStatus(running, label) { $('task-dot').className = 'dot ' + (running ? 'run' : ''); $('task-text').textContent = running ? (label || '运行中') : '空闲'; $('console-task-label').textContent = label ? '｜' + label : ''; }
+
+function setupTabs() {
+  document.querySelectorAll('.nav button').forEach(button => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('active', b === button));
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.id === 'tab-' + button.dataset.tab));
+      updateSelectedChatBars();
+    });
+  });
+}
+
+function setupSegments() {
+  document.querySelectorAll('.segment').forEach(seg => {
+    seg.querySelectorAll('button').forEach(button => {
+      button.addEventListener('click', () => {
+        seg.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === button));
+        if (seg.id === 'login-type-seg') toggleLoginType();
+        if (seg.id === 'dl-mode-seg') toggleDownloadMode();
+      });
+    });
+  });
+}
+
+function toggleLoginType() { const type = getSeg('login-type-seg'); $('login-desktop-opts').style.display = type === 'desktop' ? '' : 'none'; $('login-code-opts').style.display = type === 'code' ? '' : 'none'; $('login-qr-opts').style.display = type === 'qr' ? '' : 'none'; }
+function toggleDownloadMode() { const mode = getSeg('dl-mode-seg'); $('dl-url-mode').style.display = mode === 'url' ? '' : 'none'; $('dl-file-mode').style.display = mode === 'file' ? '' : 'none'; $('dl-quick-mode').style.display = mode === 'quick' ? '' : 'none'; }
+function toggleQuickType() { const type = val('dl-quick-type'); $('dl-quick-date-row').style.display = type === 'time' ? '' : 'none'; $('dl-quick-input-field').style.display = type === 'time' ? 'none' : ''; $('dl-quick-input-label').textContent = type === 'id' ? 'ID 范围（开始,结束）' : '数量'; $('dl-quick-input').placeholder = type === 'id' ? '1,1000' : '100'; }
+function toggleExpType() { const type = val('exp-type'); $('exp-time-opts').style.display = type === 'time' ? '' : 'none'; $('exp-id-opts').style.display = type === 'id' ? '' : 'none'; $('exp-last-opts').style.display = type === 'last' ? '' : 'none'; }
+
+async function loadConfig() { const r = await fetch('/api/config'); config = await r.json(); fillSettings(); }
+function fillSettings() { setVal('cfg-tdl-path', config.tdl_path || ''); setVal('cfg-tdl-home', config.tdl_home || ''); setVal('cfg-namespace', config.namespace || 'default'); setVal('cfg-proxy', config.proxy || ''); setVal('cfg-pool', config.pool || 8); setVal('cfg-limit', config.limit || 2); setVal('cfg-threads', config.threads || 4); setVal('cfg-download-dir', config.download_dir || 'downloads'); setVal('cfg-port', config.port || 8765); setVal('dl-dir', config.download_dir || 'downloads'); setVal('dl-limit', config.limit || 2); setVal('dl-threads', config.threads || 4); }
+async function saveSettings() { const body = { tdl_path: val('cfg-tdl-path'), tdl_home: val('cfg-tdl-home'), namespace: val('cfg-namespace'), proxy: val('cfg-proxy'), pool: Number(val('cfg-pool')) || 8, limit: Number(val('cfg-limit')) || 2, threads: Number(val('cfg-threads')) || 4, download_dir: val('cfg-download-dir') || 'downloads', port: Number(val('cfg-port')) || 8765 }; const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); config = data.config || body; fillSettings(); $('settings-saved').style.display = 'inline'; setTimeout(() => $('settings-saved').style.display = 'none', 1800); toast('设置已保存', 'success'); checkLoginStatus(); }
+async function checkLoginStatus() { try { const r = await fetch('/api/login-status'); const data = await r.json(); $('login-dot').className = 'dot ' + (data.logged_in ? 'ok' : ''); $('login-text').textContent = data.logged_in ? '已登录' : '未登录'; } catch { $('login-text').textContent = '未知'; } }
+async function loadVersion() { try { const r = await fetch('/api/version'); const data = await r.json(); $('version-info').textContent = data.version || '未知'; } catch { $('version-info').textContent = '加载版本失败'; } }
+
+function connectStream(taskId, onEnd) {
+  if (currentEventSource) currentEventSource.close();
+  currentTaskId = taskId;
+  currentEventSource = new EventSource('/api/stream/' + taskId);
+  currentEventSource.onmessage = event => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'line') {
+      const lower = String(data.data).toLowerCase();
+      const cls = lower.includes('error') || lower.includes('panic') || lower.includes('fatal') ? 'error' : (lower.includes('complete') || lower.includes('success') || lower.includes('done') ? 'success' : '');
+      appendConsole(data.data, cls);
+    }
+    if (data.type === 'end') {
+      appendConsole('[任务结束：' + data.status + '，退出码 ' + data.exit_code + ']', 'system');
+      setTaskStatus(false);
+      currentEventSource.close();
+      currentEventSource = null;
+      if (onEnd) onEnd(data, taskId);
+      checkLoginStatus();
+    }
+    if (data.type === 'error') appendConsole('[错误：' + (data.message || '未知') + ']', 'error');
+  };
+}
+
+async function startTask(endpoint, body, label, onEnd) { const r = await fetch('/api/' + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!data.task_id) { const message = data.error || '启动任务失败'; appendConsole('[启动失败：' + message + ']', 'error'); toast(message, 'error'); return null; } appendConsole('$ ' + (data.command || []).join(' '), 'cmd'); setTaskStatus(true, label); connectStream(data.task_id, onEnd); return data.task_id; }
+async function sendInput() { if (!currentTaskId || !val('console-input')) return; await fetch('/api/task/' + currentTaskId + '/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: val('console-input') }) }); appendConsole('> ' + val('console-input'), 'info'); setVal('console-input', ''); }
+async function stopTask() { if (!currentTaskId) return; const r = await fetch('/api/task/' + currentTaskId + '/stop', { method: 'POST' }); const data = await r.json(); toast(data.ok ? '任务已停止' : (data.error || data.message || '停止失败'), data.ok ? 'warning' : 'error'); }
+
+function doLogin() { const type = getSeg('login-type-seg'); const body = { type }; if (type === 'desktop') { body.desktop_path = val('login-desktop-path'); body.passcode = val('login-passcode'); } startTask('login', body, '登录', data => toast(data.status === 'done' ? '登录成功' : '登录失败', data.status === 'done' ? 'success' : 'error')); }
+async function listChats() { appendConsole('正在获取聊天列表...', 'info'); await startTask('chats', { filter: val('chat-filter') || 'true' }, '聊天列表', (data, taskId) => data.status === 'done' ? parseChatList(taskId) : toast('获取聊天列表失败', 'error')); }
+async function parseChatList(taskId) { const r = await fetch('/api/task/' + taskId); const task = await r.json(); const full = (task.lines || []).join('\n'); const candidates = [full.trim(), (full.match(/\[[\s\S]*\]/) || [])[0], (full.match(/\{[\s\S]*\}/) || [])[0]].filter(Boolean); for (const text of candidates) { try { const parsed = JSON.parse(text); chatData = Array.isArray(parsed) ? parsed : (parsed.data || parsed.chats || []); if (Array.isArray(chatData)) { renderChats(chatData); return; } } catch {} } toast('无法解析聊天列表，请查看控制台输出', 'error'); }
+function renderChats(chats) { $('chat-results').style.display = ''; $('chat-count').textContent = '(' + chats.length + ' 个)'; const tbody = $('chat-tbody'); tbody.innerHTML = ''; chats.forEach(chat => { const name = chat.title || chat.name || chat.first_name || chat.username || '(未命名)'; const visibleName = chat.visible_name || chat.visibleName || ''; const type = chat.type || 'chat'; const id = chat.id || ''; const username = chat.username || ''; const tr = document.createElement('tr'); tr.innerHTML = '<td>' + esc(name) + '</td><td>' + esc(visibleName) + '</td><td><span class="badge">' + esc(type) + '</span></td><td class="mono">' + esc(String(id)) + '</td><td>' + esc(username) + '</td>'; tr.onclick = () => { selectedChat = { name, visibleName, id, username, type }; document.querySelectorAll('#chat-tbody tr').forEach(row => row.classList.remove('selected')); tr.classList.add('selected'); updateSelectedChatBars(); toast('已选择：' + (visibleName || name), 'success'); }; tbody.appendChild(tr); }); }
+function filterChats() { const q = val('chat-search').toLowerCase(); renderChats(chatData.filter(c => String(c.title || c.name || c.visible_name || c.visibleName || c.username || c.id || '').toLowerCase().includes(q))); }
+function esc(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
+function updateSelectedChatBars() { ['selected-chat-display', 'dl-selected-chat', 'exp-selected-chat'].forEach(id => { const el = $(id); if (!el) return; if (!selectedChat) { el.innerHTML = ''; return; } const commandRef = selectedChat.username || String(selectedChat.id); const displayRef = selectedChat.username ? '@' + selectedChat.username : String(selectedChat.id); const title = selectedChat.visibleName || selectedChat.name; el.innerHTML = '<div class="selected-chat">已选择聊天：<strong>' + esc(title) + '</strong> (' + esc(displayRef) + ')<button onclick="selectedChat=null;updateSelectedChatBars()">&times;</button></div>'; if (id === 'dl-selected-chat') setVal('dl-quick-chat', commandRef); if (id === 'exp-selected-chat') setVal('exp-chat', commandRef); }); }
+
+function downloadOptions() { return { dir: val('dl-dir') || config.download_dir || 'downloads', limit: Number(val('dl-limit')) || config.limit || 2, threads: Number(val('dl-threads')) || config.threads || 4, include: val('dl-include'), exclude: val('dl-exclude'), template: val('dl-template'), group: checked('dl-group'), desc: checked('dl-desc'), skip_same: checked('dl-skip-same'), rewrite_ext: checked('dl-rewrite-ext'), takeout: checked('dl-takeout'), continue: checked('dl-continue'), restart: checked('dl-restart') }; }
+function downloadBody(extra) { const mode = getSeg('dl-mode-seg'); const body = { mode, ...downloadOptions(), ...(extra || {}) }; if (mode === 'url') { body.urls = splitLines(val('dl-urls')); if (!body.urls.length) throw new Error('请至少输入一个消息链接'); } if (mode === 'file') { body.files = splitLines(val('dl-files')); if (!body.files.length) throw new Error('请至少输入一个导出文件路径'); } return body; }
+function doDownload() { let body; try { body = downloadBody(); } catch (e) { return toast(e.message, 'error'); } if (body.mode === 'quick') { if (body.continue || body.restart) return toast('导出并下载模式不能直接继续，请切到导出文件模式并填入上次生成的 JSON', 'warning'); return quickDownload(body); } if (body.continue || body.restart) return startTask('download', body, body.continue ? '继续下载' : '重新下载', data => toast(data.status === 'done' ? '任务完成' : '任务失败', data.status === 'done' ? 'success' : 'error')); startTask('download', body, '下载', data => toast(data.status === 'done' ? '下载完成' : '下载失败', data.status === 'done' ? 'success' : 'error')); }
+function continueLastDownload() { let body; try { body = downloadBody({ continue: true, restart: false }); } catch (e) { return toast(e.message + '，继续下载需要和上次相同的来源', 'error'); } if (body.mode === 'quick') return toast('导出并下载模式请用同一个导出文件继续，或重新点开始下载', 'warning'); startTask('download', body, '继续下载', data => toast(data.status === 'done' ? '继续下载完成' : '继续下载失败', data.status === 'done' ? 'success' : 'error')); }
+function restartLastDownload() { let body; try { body = downloadBody({ continue: false, restart: true }); } catch (e) { return toast(e.message + '，重新开始也需要原来的来源', 'error'); } if (body.mode === 'quick') return toast('导出并下载模式请重新点开始下载', 'warning'); startTask('download', body, '重新下载', data => toast(data.status === 'done' ? '重新下载完成' : '重新下载失败', data.status === 'done' ? 'success' : 'error')); }
+function quickDownload(options) { const type = val('dl-quick-type'); let input = ''; if (type === 'last') input = val('dl-quick-input') || '100'; if (type === 'id') { input = val('dl-quick-input'); if (!input) return toast('请输入 ID 范围（开始,结束）', 'error'); } if (type === 'time') { if (!$('dl-quick-start').value || !$('dl-quick-end').value) return toast('请选择开始和结束日期', 'error'); input = Math.floor(new Date($('dl-quick-start').value).getTime() / 1000) + ',' + Math.floor(new Date($('dl-quick-end').value).getTime() / 1000); } const output = 'tdl-quick-export-' + Date.now() + '.json'; appendConsole('第 1 步：正在导出消息...', 'info'); startTask('export', { chat: val('dl-quick-chat'), type, input, filter: val('dl-quick-filter') || 'true', output }, '导出', data => { if (data.status !== 'done') return toast('导出失败，已取消下载', 'error'); appendConsole('第 2 步：正在从导出文件下载...', 'info'); startTask('download', { ...options, mode: 'file', files: [output] }, '下载', result => toast(result.status === 'done' ? '下载完成' : '下载失败', result.status === 'done' ? 'success' : 'error')); }); }
+
+function exportInput() { const type = val('exp-type'); if (type === 'last') return val('exp-last-count') || '100'; if (type === 'id') { if (!val('exp-id-start') || !val('exp-id-end')) throw new Error('请输入起始和结束 ID'); return val('exp-id-start') + ',' + val('exp-id-end'); } if (!$('exp-start').value || !$('exp-end').value) throw new Error('请选择开始和结束日期'); return Math.floor(new Date($('exp-start').value).getTime() / 1000) + ',' + Math.floor(new Date($('exp-end').value).getTime() / 1000); }
+function doExport() { let input; try { input = exportInput(); } catch (e) { return toast(e.message, 'error'); } const body = { chat: val('exp-chat'), type: val('exp-type'), input, filter: val('exp-filter') || 'true', output: val('exp-output') || 'tdl-export.json', all: checked('exp-all'), with_content: checked('exp-content'), raw: checked('exp-raw'), topic: val('exp-topic') || null, reply: val('exp-reply') || null }; startTask('export', body, '导出', data => toast(data.status === 'done' ? '导出完成：' + body.output : '导出失败', data.status === 'done' ? 'success' : 'error')); }
+function doForward() { const body = { from: splitLines(val('fwd-from')), to: val('fwd-to'), mode: val('fwd-mode'), desc: checked('fwd-desc'), dry_run: checked('fwd-dry-run'), silent: checked('fwd-silent'), single: checked('fwd-single'), edit: val('fwd-edit') }; if (!body.from.length) return toast('请输入来源链接或文件', 'error'); if (!body.to) return toast('请输入目标聊天', 'error'); startTask('forward', body, '转发', data => toast(data.status === 'done' ? '转发完成' : '转发失败', data.status === 'done' ? 'success' : 'error')); }
+function doUpload() { const body = { paths: splitLines(val('up-paths')), chat: val('up-chat'), topic: val('up-topic') || null, include: val('up-include'), exclude: val('up-exclude'), photo: checked('up-photo'), rm: checked('up-rm'), caption: val('up-caption') }; if (!body.paths.length) return toast('请输入文件或目录路径', 'error'); startTask('upload', body, '上传', data => toast(data.status === 'done' ? '上传完成' : '上传失败', data.status === 'done' ? 'success' : 'error')); }
+function doUsers() { const body = { chat: val('users-chat'), output: val('users-output') || 'tdl-users.json', raw: checked('users-raw') }; if (!body.chat) return toast('请输入聊天域名或 ID', 'error'); startTask('users', body, '用户导出', data => toast(data.status === 'done' ? '用户导出完成：' + body.output : '导出失败', data.status === 'done' ? 'success' : 'error')); }
+
+async function init() { setupTabs(); setupSegments(); toggleLoginType(); toggleDownloadMode(); toggleQuickType(); toggleExpType(); await loadConfig(); checkLoginStatus(); loadVersion(); }
+init();
+</script>
+</body>
+</html>

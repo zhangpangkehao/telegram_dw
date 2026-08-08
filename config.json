@@ -1,0 +1,12 @@
+{
+  "tdl_path": "D:\\ruanjian\\ruanjian\\tdl_Windows_64bit\\tdl.exe",
+  "tdl_home": "D:\\file\\kaifa\\project\\ai\\telegram_dw\\tdl_home",
+  "namespace": "default",
+  "proxy": "",
+  "pool": 8,
+  "limit": 2,
+  "threads": 4,
+  "download_dir": "downloads",
+  "host": "127.0.0.1",
+  "port": 8765
+}
