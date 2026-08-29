@@ -82,6 +82,29 @@ tr.selected td { background: var(--accent-soft); }
 .badge { display: inline-block; padding: 2px 7px; border-radius: 3px; background: #e8eef6; color: #475569; font-size: 11px; }
 .selected-chat { display: flex; align-items: center; gap: 8px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 4px; padding: 9px 12px; margin-bottom: 16px; }
 .selected-chat button { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 18px; }
+.preview-toolbar { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(180px, 1fr) auto; gap: 10px; align-items: end; }
+.preview-toolbar .field { margin-bottom: 0; }
+.preview-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 10px; color: var(--muted); }
+.preview-filters { display: flex; gap: 6px; }
+.preview-filters button { border: 1px solid var(--border); background: var(--panel); color: var(--muted); padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+.preview-filters button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.preview-item { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; min-width: 0; }
+.preview-thumb { width: 100%; aspect-ratio: 4 / 3; border: 0; background: #e8eef6; display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden; color: var(--muted); }
+.preview-thumb img, .preview-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.preview-file-icon { font-size: 34px; font-weight: 700; color: #475569; }
+.preview-meta { padding: 10px; }
+.preview-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; margin-bottom: 5px; }
+.preview-sub { color: var(--dim); font-size: 11px; display: flex; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.preview-item-actions { display: flex; gap: 6px; }
+.preview-item-actions .btn { flex: 1; padding: 7px 9px; }
+.preview-empty { border: 1px dashed var(--border); color: var(--muted); text-align: center; padding: 42px 16px; border-radius: var(--radius); }
+.preview-modal { position: fixed; inset: 0; background: rgba(15, 23, 42, .78); z-index: 120; display: none; align-items: center; justify-content: center; padding: 24px; }
+.preview-modal.open { display: flex; }
+.preview-modal-content { position: relative; width: min(1100px, 96vw); height: min(760px, 90vh); display: flex; align-items: center; justify-content: center; }
+.preview-modal-content img, .preview-modal-content video, .preview-modal-content audio { max-width: 100%; max-height: 100%; object-fit: contain; }
+.preview-modal-close { position: absolute; right: 0; top: 0; width: 38px; height: 38px; border: 0; border-radius: 50%; background: rgba(255,255,255,.94); color: #1f2937; cursor: pointer; font-size: 23px; z-index: 2; }
+.preview-modal-download { position: absolute; right: 48px; top: 0; text-decoration: none; }
 .console { grid-area: console; background: #ffffff; border-top: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: 0 -1px 2px rgba(15, 23, 42, .04); }
 .console.collapsed { height: 36px; }
 .console-head { height: 36px; display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border-bottom: 1px solid var(--border); padding: 0 12px; color: var(--muted); font-size: 12px; }
@@ -98,7 +121,7 @@ tr.selected td { background: var(--accent-soft); }
 .toast { position: fixed; right: 16px; top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; z-index: 99; max-width: 360px; }
 .toast.success { border-color: var(--ok); }
 .toast.error { border-color: var(--bad); }
-@media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr 230px; grid-template-areas: "side" "main" "console"; } .sidebar { max-height: 190px; } .nav { display: flex; flex-wrap: wrap; } .nav button { width: auto; } .row { flex-direction: column; gap: 0; } }
+@media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr 230px; grid-template-areas: "side" "main" "console"; } .sidebar { max-height: 190px; } .nav { display: flex; flex-wrap: wrap; } .nav button { width: auto; } .row { flex-direction: column; gap: 0; } .preview-toolbar { grid-template-columns: 1fr; } .preview-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } }
 </style>
 </head>
 <body>
@@ -108,6 +131,7 @@ tr.selected td { background: var(--accent-soft); }
     <nav class="nav">
       <button data-tab="login">登录</button>
       <button data-tab="chats">聊天列表</button>
+      <button data-tab="preview">记录预览</button>
       <button class="active" data-tab="download">下载</button>
       <button data-tab="export">导出</button>
       <button data-tab="forward">转发</button>
@@ -176,6 +200,23 @@ tr.selected td { background: var(--accent-soft); }
           </table>
         </div>
       </div>
+    </section>
+
+    <section id="tab-preview" class="tab">
+      <div class="title">聊天记录预览</div>
+      <div class="desc">加载 tdl 导出的 JSON，图片和视频可直接预览；点击下载按钮保存到本地。</div>
+      <div class="card">
+        <div class="preview-toolbar">
+          <div class="field"><label>导出 JSON 文件</label><input id="preview-export" class="mono" placeholder="tdl-export.json"></div>
+          <div class="field"><label>下载目录</label><input id="preview-dir" class="mono" placeholder="downloads"></div>
+          <button class="btn" onclick="loadPreview()">加载预览</button>
+        </div>
+      </div>
+      <div id="preview-results" style="display:none;">
+        <div class="preview-summary"><span id="preview-count"></span><div class="preview-filters"><button class="active" data-filter="all">全部</button><button data-filter="image">图片</button><button data-filter="video">视频</button><button data-filter="file">其他文件</button></div></div>
+        <div id="preview-grid" class="preview-grid"></div>
+      </div>
+      <div id="preview-empty" class="preview-empty">输入导出的 JSON 文件后加载聊天记录。</div>
     </section>
 
     <section id="tab-download" class="tab active">
@@ -262,6 +303,7 @@ tr.selected td { background: var(--accent-soft); }
         </div>
       </div>
       <button class="btn" onclick="doExport()">导出消息</button>
+      <a id="exp-download-link" class="btn secondary" style="text-decoration:none;margin-left:10px;" href="#" onclick="return downloadExportFile()">下载 JSON</a>
     </section>
 
     <section id="tab-forward" class="tab">
@@ -342,6 +384,8 @@ let currentTaskId = null;
 let currentEventSource = null;
 let selectedChat = null;
 let chatData = [];
+let previewData = [];
+let previewFilter = 'all';
 
 function $(id) { return document.getElementById(id); }
 function val(id) { return $(id) ? $(id).value.trim() : ''; }
@@ -385,7 +429,7 @@ function toggleQuickType() { const type = val('dl-quick-type'); $('dl-quick-date
 function toggleExpType() { const type = val('exp-type'); $('exp-time-opts').style.display = type === 'time' ? '' : 'none'; $('exp-id-opts').style.display = type === 'id' ? '' : 'none'; $('exp-last-opts').style.display = type === 'last' ? '' : 'none'; }
 
 async function loadConfig() { const r = await fetch('/api/config'); config = await r.json(); fillSettings(); }
-function fillSettings() { setVal('cfg-tdl-path', config.tdl_path || ''); setVal('cfg-tdl-home', config.tdl_home || ''); setVal('cfg-namespace', config.namespace || 'default'); setVal('cfg-proxy', config.proxy || ''); setVal('cfg-pool', config.pool || 8); setVal('cfg-limit', config.limit || 2); setVal('cfg-threads', config.threads || 4); setVal('cfg-download-dir', config.download_dir || 'downloads'); setVal('cfg-port', config.port || 8765); setVal('dl-dir', config.download_dir || 'downloads'); setVal('dl-limit', config.limit || 2); setVal('dl-threads', config.threads || 4); }
+function fillSettings() { setVal('cfg-tdl-path', config.tdl_path || ''); setVal('cfg-tdl-home', config.tdl_home || ''); setVal('cfg-namespace', config.namespace || 'default'); setVal('cfg-proxy', config.proxy || ''); setVal('cfg-pool', config.pool || 8); setVal('cfg-limit', config.limit || 2); setVal('cfg-threads', config.threads || 4); setVal('cfg-download-dir', config.download_dir || 'downloads'); setVal('cfg-port', config.port || 8765); setVal('dl-dir', config.download_dir || 'downloads'); setVal('dl-limit', config.limit || 2); setVal('dl-threads', config.threads || 4); setVal('preview-dir', config.download_dir || 'downloads'); }
 async function saveSettings() { const body = { tdl_path: val('cfg-tdl-path'), tdl_home: val('cfg-tdl-home'), namespace: val('cfg-namespace'), proxy: val('cfg-proxy'), pool: Number(val('cfg-pool')) || 8, limit: Number(val('cfg-limit')) || 2, threads: Number(val('cfg-threads')) || 4, download_dir: val('cfg-download-dir') || 'downloads', port: Number(val('cfg-port')) || 8765 }; const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); config = data.config || body; fillSettings(); $('settings-saved').style.display = 'inline'; setTimeout(() => $('settings-saved').style.display = 'none', 1800); toast('设置已保存', 'success'); checkLoginStatus(); }
 async function checkLoginStatus() { try { const r = await fetch('/api/login-status'); const data = await r.json(); $('login-dot').className = 'dot ' + (data.logged_in ? 'ok' : ''); $('login-text').textContent = data.logged_in ? '已登录' : '未登录'; } catch { $('login-text').textContent = '未知'; } }
 async function loadVersion() { try { const r = await fetch('/api/version'); const data = await r.json(); $('version-info').textContent = data.version || '未知'; } catch { $('version-info').textContent = '加载版本失败'; } }
@@ -425,6 +469,50 @@ function filterChats() { const q = val('chat-search').toLowerCase(); renderChats
 function esc(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
 function updateSelectedChatBars() { ['selected-chat-display', 'dl-selected-chat', 'exp-selected-chat'].forEach(id => { const el = $(id); if (!el) return; if (!selectedChat) { el.innerHTML = ''; return; } const commandRef = selectedChat.username || String(selectedChat.id); const displayRef = selectedChat.username ? '@' + selectedChat.username : String(selectedChat.id); const title = selectedChat.visibleName || selectedChat.name; el.innerHTML = '<div class="selected-chat">已选择聊天：<strong>' + esc(title) + '</strong> (' + esc(displayRef) + ')<button onclick="selectedChat=null;updateSelectedChatBars()">&times;</button></div>'; if (id === 'dl-selected-chat') setVal('dl-quick-chat', commandRef); if (id === 'exp-selected-chat') setVal('exp-chat', commandRef); }); }
 
+async function loadPreview() {
+  const exportFile = val('preview-export');
+  if (!exportFile) return toast('请输入导出的 JSON 文件路径', 'error');
+  const r = await fetch('/api/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ export_file: exportFile, download_dir: val('preview-dir') || config.download_dir || 'downloads' }) });
+  const data = await r.json();
+  if (!data.ok) return toast(data.error || '加载预览失败', 'error');
+  previewData = data.items || [];
+  $('preview-results').style.display = '';
+  $('preview-empty').style.display = previewData.length ? 'none' : '';
+  renderPreview();
+}
+function formatBytes(bytes) { if (!bytes) return ''; const units = ['B', 'KB', 'MB', 'GB']; let n = bytes; let i = 0; while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; } return n.toFixed(i ? 1 : 0) + ' ' + units[i]; }
+function previewLabel(kind) { return kind === 'image' ? '图片' : (kind === 'video' ? '视频' : '文件'); }
+function renderPreview() {
+  const items = previewData.filter(item => previewFilter === 'all' || item.kind === previewFilter);
+  $('preview-count').textContent = '共 ' + previewData.length + ' 个文件，当前显示 ' + items.length + ' 个';
+  const grid = $('preview-grid'); grid.innerHTML = '';
+  if (!items.length) { grid.innerHTML = '<div class="preview-empty">没有匹配的文件</div>'; return; }
+  items.forEach(item => {
+    const card = document.createElement('article'); card.className = 'preview-item';
+    const thumb = document.createElement('button'); thumb.className = 'preview-thumb'; thumb.title = item.downloaded ? '打开预览' : '下载文件';
+    if (item.downloaded && (item.kind === 'image' || item.kind === 'video')) {
+      if (item.kind === 'image') { const img = document.createElement('img'); img.src = item.media_url; img.alt = item.filename; thumb.appendChild(img); }
+      else { const video = document.createElement('video'); video.src = item.media_url; video.muted = true; video.preload = 'metadata'; thumb.appendChild(video); }
+      thumb.onclick = () => openPreviewModal(item);
+    } else { thumb.innerHTML = '<span class="preview-file-icon">' + esc(item.kind === 'file' ? 'FILE' : item.kind.toUpperCase()) + '</span>'; if (item.downloaded) thumb.onclick = () => window.open(item.media_url, '_blank'); }
+    const meta = document.createElement('div'); meta.className = 'preview-meta';
+    meta.innerHTML = '<div class="preview-name" title="' + esc(item.filename) + '">' + esc(item.filename) + '</div><div class="preview-sub"><span>' + previewLabel(item.kind) + '</span><span>' + (item.downloaded ? formatBytes(item.size) : '未下载') + '</span></div>';
+    const actions = document.createElement('div'); actions.className = 'preview-item-actions';
+    if (item.downloaded) { const download = document.createElement('a'); download.className = 'btn secondary small'; download.href = item.download_url; download.textContent = '下载'; download.setAttribute('download', item.filename); actions.appendChild(download); }
+    else { const button = document.createElement('button'); button.className = 'btn small'; button.textContent = '下载'; button.onclick = () => downloadPreviewItem(item, button); actions.appendChild(button); thumb.onclick = () => downloadPreviewItem(item, button); }
+    meta.appendChild(actions); card.appendChild(thumb); card.appendChild(meta); grid.appendChild(card);
+  });
+}
+async function downloadPreviewItem(item, button) {
+  button.disabled = true; button.textContent = '下载中...';
+  const r = await fetch('/api/preview/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ export_file: val('preview-export'), download_dir: val('preview-dir') || config.download_dir, group_index: item.group_index, message_index: item.message_index }) });
+  const data = await r.json();
+  if (!data.task_id) { button.disabled = false; button.textContent = '下载'; return toast(data.error || '下载启动失败', 'error'); }
+  appendConsole('$ ' + (data.command || []).join(' '), 'cmd'); setTaskStatus(true, '预览文件下载'); connectStream(data.task_id, async result => { if (result.status !== 'done') { button.disabled = false; button.textContent = '下载'; return toast('文件下载失败', 'error'); } toast('文件下载完成', 'success'); await loadPreview(); });
+}
+function openPreviewModal(item) { const content = $('preview-modal-content'); content.querySelectorAll('img,video,audio,.preview-modal-download').forEach(el => el.remove()); let media; if (item.kind === 'image') { media = document.createElement('img'); } else if (item.kind === 'video') { media = document.createElement('video'); media.controls = true; media.autoplay = true; } else { media = document.createElement('audio'); media.controls = true; } media.src = item.media_url; media.alt = item.filename; content.appendChild(media); const download = document.createElement('a'); download.className = 'btn small preview-modal-download'; download.href = item.download_url; download.download = item.filename; download.textContent = '下载'; content.appendChild(download); $('preview-modal').classList.add('open'); }
+function closePreviewModal(event) { if (!event || event.target === $('preview-modal') || event.target.classList.contains('preview-modal-close')) $('preview-modal').classList.remove('open'); }
+
 function downloadOptions() { return { dir: val('dl-dir') || config.download_dir || 'downloads', limit: Number(val('dl-limit')) || config.limit || 2, threads: Number(val('dl-threads')) || config.threads || 4, include: val('dl-include'), exclude: val('dl-exclude'), template: val('dl-template'), group: checked('dl-group'), desc: checked('dl-desc'), skip_same: checked('dl-skip-same'), rewrite_ext: checked('dl-rewrite-ext'), takeout: checked('dl-takeout'), continue: checked('dl-continue'), restart: checked('dl-restart') }; }
 function downloadBody(extra) { const mode = getSeg('dl-mode-seg'); const body = { mode, ...downloadOptions(), ...(extra || {}) }; if (mode === 'url') { body.urls = splitLines(val('dl-urls')); if (!body.urls.length) throw new Error('请至少输入一个消息链接'); } if (mode === 'file') { body.files = splitLines(val('dl-files')); if (!body.files.length) throw new Error('请至少输入一个导出文件路径'); } return body; }
 function doDownload() { let body; try { body = downloadBody(); } catch (e) { return toast(e.message, 'error'); } if (body.mode === 'quick') { if (body.continue || body.restart) return toast('导出并下载模式不能直接继续，请切到导出文件模式并填入上次生成的 JSON', 'warning'); return quickDownload(body); } if (body.continue || body.restart) return startTask('download', body, body.continue ? '继续下载' : '重新下载', data => toast(data.status === 'done' ? '任务完成' : '任务失败', data.status === 'done' ? 'success' : 'error')); startTask('download', body, '下载', data => toast(data.status === 'done' ? '下载完成' : '下载失败', data.status === 'done' ? 'success' : 'error')); }
@@ -438,8 +526,11 @@ function doForward() { const body = { from: splitLines(val('fwd-from')), to: val
 function doUpload() { const body = { paths: splitLines(val('up-paths')), chat: val('up-chat'), topic: val('up-topic') || null, include: val('up-include'), exclude: val('up-exclude'), photo: checked('up-photo'), rm: checked('up-rm'), caption: val('up-caption') }; if (!body.paths.length) return toast('请输入文件或目录路径', 'error'); startTask('upload', body, '上传', data => toast(data.status === 'done' ? '上传完成' : '上传失败', data.status === 'done' ? 'success' : 'error')); }
 function doUsers() { const body = { chat: val('users-chat'), output: val('users-output') || 'tdl-users.json', raw: checked('users-raw') }; if (!body.chat) return toast('请输入聊天域名或 ID', 'error'); startTask('users', body, '用户导出', data => toast(data.status === 'done' ? '用户导出完成：' + body.output : '导出失败', data.status === 'done' ? 'success' : 'error')); }
 
-async function init() { setupTabs(); setupSegments(); toggleLoginType(); toggleDownloadMode(); toggleQuickType(); toggleExpType(); await loadConfig(); checkLoginStatus(); loadVersion(); }
+function downloadExportFile() { const output = val('exp-output') || 'tdl-export.json'; window.open('/api/file?path=' + encodeURIComponent(output), '_blank'); return false; }
+function setupPreviewFilters() { document.querySelectorAll('.preview-filters button').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.preview-filters button').forEach(b => b.classList.toggle('active', b === button)); previewFilter = button.dataset.filter; renderPreview(); })); }
+async function init() { setupTabs(); setupSegments(); setupPreviewFilters(); toggleLoginType(); toggleDownloadMode(); toggleQuickType(); toggleExpType(); await loadConfig(); checkLoginStatus(); loadVersion(); }
 init();
 </script>
+<div id="preview-modal" class="preview-modal" onclick="closePreviewModal(event)"><div id="preview-modal-content" class="preview-modal-content"><button class="preview-modal-close" aria-label="关闭预览">&times;</button></div></div>
 </body>
 </html>

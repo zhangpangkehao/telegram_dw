@@ -6,7 +6,9 @@ streaming their output to the browser in real time via SSE.
 """
 
 import http.server
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -17,7 +19,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -64,7 +66,7 @@ def save_config(cfg):
 # ---------------------------------------------------------------------------
 
 class Task:
-    def __init__(self, task_id, command, env, label=""):
+    def __init__(self, task_id, command, env, label="", cleanup_paths=None):
         self.id = task_id
         self.command = command
         self.env = env
@@ -77,10 +79,13 @@ class Task:
         self.start_time = time.time()
         self.end_time = None
         self.result = None  # optional parsed result (e.g. chat list JSON)
+        self.cleanup_paths = list(cleanup_paths or [])
 
 
 tasks = {}
 tasks_lock = threading.Lock()
+preview_files = {}
+preview_files_lock = threading.Lock()
 
 # ANSI / control-character stripper
 _ANSI_RE = re.compile(
@@ -132,11 +137,16 @@ def _run_task(task):
     finally:
         task.end_time = time.time()
         task.output_queue.put(("end", {"status": task.status, "exit_code": task.exit_code}))
+        for path in task.cleanup_paths:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
-def create_task(command, env, label=""):
+def create_task(command, env, label="", cleanup_paths=None):
     task_id = uuid.uuid4().hex[:12]
-    task = Task(task_id, command, env, label)
+    task = Task(task_id, command, env, label, cleanup_paths)
     with tasks_lock:
         active = next((t for t in tasks.values() if t.status in ("pending", "running")), None)
         if active:
@@ -432,6 +442,158 @@ def check_login(cfg):
 
 
 # ---------------------------------------------------------------------------
+# Export preview helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_user_path(value):
+    path = Path(os.path.expandvars(os.path.expanduser(str(value or ""))))
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path.resolve()
+
+
+def _export_groups(payload):
+    if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict) and isinstance(item.get("messages"), list)]
+    if isinstance(payload, dict):
+        for key in ("data", "chats", "dialogs"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict) and isinstance(item.get("messages"), list)]
+    return []
+
+
+def _message_file(message):
+    value = message.get("file") or message.get("File") or message.get("file_name")
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("file_name") or value.get("path")
+    return str(value or "").strip()
+
+
+def _media_kind(filename):
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    if mime.startswith("image/"):
+        return "image", mime
+    if mime.startswith("video/"):
+        return "video", mime
+    if mime.startswith("audio/"):
+        return "audio", mime
+    return "file", mime
+
+
+def _find_downloaded_files(filenames, roots):
+    wanted = {Path(name).name.casefold() for name in filenames if name}
+    found = {}
+    visited = set()
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        root_key = str(root).casefold()
+        if root_key in visited:
+            continue
+        visited.add(root_key)
+        for current, _, files in os.walk(root):
+            for filename in files:
+                key = filename.casefold()
+                if key in wanted and key not in found:
+                    found[key] = (Path(current) / filename).resolve()
+            if len(found) == len(wanted):
+                return found
+    return found
+
+
+def build_preview(export_file, download_dir):
+    export_path = _resolve_user_path(export_file)
+    if not export_path.is_file():
+        raise FileNotFoundError(f"Export JSON not found: {export_path}")
+    with export_path.open("r", encoding="utf-8-sig") as stream:
+        payload = json.load(stream)
+    groups = _export_groups(payload)
+    if not groups:
+        raise ValueError("The JSON file does not contain a supported tdl message list")
+
+    items = []
+    filenames = []
+    for group_index, group in enumerate(groups):
+        chat_id = group.get("id") or group.get("chat_id") or group.get("dialog_id")
+        for message_index, message in enumerate(group["messages"]):
+            if not isinstance(message, dict):
+                continue
+            filename = _message_file(message)
+            if not filename:
+                continue
+            filenames.append(filename)
+            kind, mime = _media_kind(filename)
+            items.append({
+                "chat_id": chat_id,
+                "message_id": message.get("id") or message.get("message_id"),
+                "group_index": group_index,
+                "message_index": message_index,
+                "filename": filename,
+                "kind": kind,
+                "mime": mime,
+                "text": message.get("content") or message.get("text") or message.get("caption") or "",
+            })
+
+    dl_path = _resolve_user_path(download_dir or "downloads")
+    found = _find_downloaded_files(filenames, [dl_path, export_path.parent])
+    for item in items:
+        local_path = found.get(Path(item["filename"]).name.casefold())
+        if not local_path:
+            item["downloaded"] = False
+            continue
+        token = hashlib.sha256(str(local_path).encode("utf-8")).hexdigest()[:24]
+        with preview_files_lock:
+            preview_files[token] = local_path
+        item.update({
+            "downloaded": True,
+            "size": local_path.stat().st_size,
+            "media_url": f"/api/preview/media/{token}",
+            "download_url": f"/api/preview/media/{token}?download=1",
+        })
+    return {"export_file": str(export_path), "download_dir": str(dl_path), "items": items}
+
+
+def create_preview_download(cfg, body):
+    export_path = _resolve_user_path(body.get("export_file"))
+    if not export_path.is_file():
+        raise FileNotFoundError(f"Export JSON not found: {export_path}")
+    with export_path.open("r", encoding="utf-8-sig") as stream:
+        payload = json.load(stream)
+    groups = _export_groups(payload)
+    group_index = int(body.get("group_index", -1))
+    message_index = int(body.get("message_index", -1))
+    if group_index < 0 or group_index >= len(groups):
+        raise ValueError("Invalid chat group index")
+    messages = groups[group_index]["messages"]
+    if message_index < 0 or message_index >= len(messages):
+        raise ValueError("Invalid message index")
+    message = messages[message_index]
+    if not isinstance(message, dict) or not _message_file(message):
+        raise ValueError("This message does not contain a downloadable file")
+
+    temp_path = BASE_DIR / f".preview-download-{uuid.uuid4().hex}.json"
+    temp_payload = {key: value for key, value in groups[group_index].items() if key != "messages"}
+    temp_payload["messages"] = [message]
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(temp_payload, stream, ensure_ascii=False)
+    command, _ = cmd_download(cfg, {
+        "mode": "file",
+        "files": [str(temp_path)],
+        "dir": body.get("download_dir") or cfg.get("download_dir", "downloads"),
+        "limit": body.get("limit") or cfg.get("limit", 2),
+        "threads": body.get("threads") or cfg.get("threads", 4),
+        "skip_same": True,
+    })
+    task_id, error = create_task(command, build_env(cfg), f"Download {_message_file(message)}", [temp_path])
+    if error:
+        temp_path.unlink(missing_ok=True)
+    return task_id, error, command
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -497,7 +659,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -- GET ----------------------------------------------------------------
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         cfg = load_config()
 
         if path in ("/", "/index.html"):
@@ -514,6 +677,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/login-status":
             self._send_json({"logged_in": check_login(cfg)})
+            return
+
+        if path.startswith("/api/preview/media/"):
+            token = path.rsplit("/", 1)[-1]
+            with preview_files_lock:
+                media_path = preview_files.get(token)
+            if not media_path or not media_path.is_file():
+                self._send_json({"error": "preview file not found"}, 404)
+                return
+            self._serve_media(media_path, parsed.query)
+            return
+
+        if path == "/api/file":
+            requested = parse_qs(parsed.query).get("path", [""])[0]
+            file_path = _resolve_user_path(requested)
+            if not requested or file_path.suffix.casefold() != ".json" or not file_path.is_file():
+                self._send_json({"error": "file not found"}, 404)
+                return
+            # Export outputs are local artifacts; always return them as downloads.
+            self._serve_media(file_path, "download=1")
             return
 
         if path == "/api/tasks":
@@ -570,6 +753,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True, "config": merged})
             return
 
+        if path == "/api/preview":
+            body = self._read_body()
+            try:
+                result = build_preview(body.get("export_file"), body.get("download_dir") or cfg.get("download_dir"))
+                self._send_json({"ok": True, **result})
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
+
+        if path == "/api/preview/download":
+            body = self._read_body()
+            try:
+                tid, error, command = create_preview_download(cfg, body)
+                if error:
+                    self._send_json({"error": error, "command": command}, 409)
+                    return
+                self._send_json({"task_id": tid, "command": command})
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, 400)
+            return
+
         # task-starting endpoints
         for name, builder in COMMAND_BUILDERS.items():
             if path == f"/api/{name}":
@@ -614,6 +818,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         self._send_json({"error": "not found"}, 404)
+
+    def _serve_media(self, path, query):
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        size = path.stat().st_size
+        range_header = self.headers.get("Range", "")
+        start, end = 0, size - 1
+        status = 200
+        if range_header.startswith("bytes="):
+            try:
+                raw_range = range_header[6:].split(",", 1)[0]
+                left, right = raw_range.split("-", 1)
+                if left:
+                    start = int(left)
+                if right:
+                    end = int(right)
+                else:
+                    end = min(start + 1024 * 1024 - 1, size - 1)
+                if start < 0 or start >= size or end < start:
+                    raise ValueError
+                end = min(end, size - 1)
+                status = 206
+            except (ValueError, IndexError):
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        if "download=1" in query:
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
+        self.send_header("Cache-Control", "private, max-age=300")
+        self.end_headers()
+        with path.open("rb") as stream:
+            stream.seek(start)
+            remaining = length
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     # -- SSE ----------------------------------------------------------------
 
