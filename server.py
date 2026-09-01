@@ -30,6 +30,7 @@ BASE_DIR = Path(__file__).parent.resolve()
 CONFIG_FILE = BASE_DIR / "config.json"
 INDEX_FILE = BASE_DIR / "index.html"
 DOWNLOAD_HISTORY_FILE = BASE_DIR / ".tdl-download-history.json"
+INSTANCE_FILE = BASE_DIR / ".tdl-gui-instance.json"
 
 DEFAULT_CONFIG = {
     "tdl_path": r"D:\ruanjian\ruanjian\tdl_Windows_64bit\tdl.exe",
@@ -221,6 +222,131 @@ def acquire_single_instance():
         return False
     _single_instance_handle = handle
     return True
+
+
+def _process_exists(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        if sys.platform == "win32":
+            api = _win_api()
+            if not api:
+                return False
+            _, wintypes, kernel32 = api
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            kernel32.CloseHandle(handle)
+            return True
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _find_listening_pid(port):
+    """Best-effort fallback for instances started before PID files existed."""
+    if sys.platform != "win32":
+        return None
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=8,
+        )
+        suffix = f":{int(port)}"
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 5 or fields[0].upper() != "TCP":
+                continue
+            if fields[1].endswith(suffix) and fields[3].upper() == "LISTENING":
+                return int(fields[4])
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def read_instance_info(cfg=None):
+    stale_file = False
+    try:
+        with INSTANCE_FILE.open("r", encoding="utf-8") as stream:
+            info = json.load(stream)
+        if isinstance(info, dict) and _process_exists(info.get("pid")):
+            return info
+        stale_file = True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        stale_file = INSTANCE_FILE.exists()
+    if stale_file:
+        try:
+            INSTANCE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    cfg = cfg or load_config()
+    port = int(cfg.get("port", 8765))
+    pid = _find_listening_pid(port)
+    if not pid:
+        return {"port": port}
+    return {
+        "pid": pid,
+        "host": cfg.get("host", "127.0.0.1"),
+        "port": port,
+    }
+
+
+def write_instance_info(host, port):
+    info = {
+        "pid": os.getpid(),
+        "host": host,
+        "port": port,
+        "url": f"http://{host}:{port}",
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    temp_path = INSTANCE_FILE.with_suffix(INSTANCE_FILE.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(info, stream, ensure_ascii=False, indent=2)
+    os.replace(temp_path, INSTANCE_FILE)
+    return info
+
+
+def remove_instance_info():
+    try:
+        with INSTANCE_FILE.open("r", encoding="utf-8") as stream:
+            info = json.load(stream)
+        if int(info.get("pid", -1)) != os.getpid():
+            return
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+    INSTANCE_FILE.unlink(missing_ok=True)
+
+
+def print_existing_instance(info):
+    pid = info.get("pid")
+    host = info.get("host", "127.0.0.1")
+    port = info.get("port")
+    url = info.get("url") or (f"http://{host}:{port}" if port else "")
+    print("[Error] tdl GUI 已经在运行，请使用现有窗口。")
+    if pid:
+        print(f"        PID: {pid}")
+    if url:
+        print(f"        访问地址: {url}")
+    if info.get("started_at"):
+        print(f"        启动时间: {info['started_at']}")
+    print()
+    if pid:
+        print("如需强制终止，请确认没有正在下载的任务，然后执行：")
+        print(f"  PowerShell: Stop-Process -Id {pid} -Force")
+        print(f"  CMD:        taskkill /PID {pid} /T /F")
+    elif port:
+        print("未能确定 PID，可在 PowerShell 中执行：")
+        print(f"  Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object OwningProcess")
 
 # ANSI / control-character stripper
 _ANSI_RE = re.compile(
@@ -1555,8 +1681,8 @@ def find_port(host, start):
 
 def main():
     if not acquire_single_instance():
-        print("[Error] tdl GUI 已经在运行，请使用现有窗口。")
-        return
+        print_existing_instance(read_instance_info())
+        return 2
 
     cfg = load_config()
     host = cfg.get("host", "127.0.0.1")
@@ -1578,6 +1704,7 @@ def main():
 
     server = StrictThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}"
+    write_instance_info(host, port)
     print(f"\n  tdl GUI running at {url}")
     print("  Press Ctrl+C to stop.\n")
 
@@ -1588,6 +1715,7 @@ def main():
     except Exception:
         pass
 
+    atexit.register(remove_instance_info)
     atexit.register(stop_all_tasks)
     try:
         server.serve_forever()
@@ -1596,7 +1724,9 @@ def main():
     finally:
         stop_all_tasks()
         server.server_close()
+        remove_instance_info()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

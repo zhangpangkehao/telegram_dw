@@ -8,6 +8,7 @@ venv/
 *.log.gz
 tdl-quick-export*.json
 .tdl-download-history.json
+.tdl-gui-instance.json
 tdl-export*.json
 .download-history-fix-*/
 .doc-update-*/
