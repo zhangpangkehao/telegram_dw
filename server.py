@@ -5,6 +5,7 @@ Runs a local HTTP server that serves a web UI and executes tdl commands,
 streaming their output to the browser in real time via SSE.
 """
 
+import atexit
 import http.server
 import hashlib
 import json
@@ -91,9 +92,11 @@ class Task:
         self.env = env
         self.label = label
         self.process = None
+        self.job_handle = None
         self.output_queue = queue.Queue()
-        self.status = "pending"  # pending, running, done, error
+        self.status = "pending"  # pending, running, done, error, stopped
         self.exit_code = None
+        self.stop_requested = False
         self.lines = list(initial_lines or [])
         self.start_time = time.time()
         self.end_time = None
@@ -108,6 +111,116 @@ tasks_lock = threading.Lock()
 preview_files = {}
 preview_files_lock = threading.Lock()
 download_history_lock = threading.Lock()
+_single_instance_handle = None
+
+
+def _win_api():
+    """Return the small Win32 API surface used for process lifetime control."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return ctypes, wintypes, kernel32
+
+
+def _attach_kill_job(process):
+    """Put a child process in a job that dies when this GUI process exits."""
+    api = _win_api()
+    if not api:
+        return None
+    ctypes, wintypes, kernel32 = api
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = ExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+    configured = kernel32.SetInformationJobObject(
+        job, 9, ctypes.byref(info), ctypes.sizeof(info)
+    )
+    assigned = configured and kernel32.AssignProcessToJobObject(
+        job, wintypes.HANDLE(int(process._handle))
+    )
+    if not assigned:
+        kernel32.CloseHandle(job)
+        return None
+    return job
+
+
+def _close_win_handle(handle):
+    if not handle:
+        return
+    api = _win_api()
+    if api:
+        api[2].CloseHandle(handle)
+
+
+def acquire_single_instance():
+    """Prevent two GUI servers from competing for the same tdl database."""
+    global _single_instance_handle
+    api = _win_api()
+    if not api:
+        return True
+    ctypes, _, kernel32 = api
+    name_hash = hashlib.sha256(str(BASE_DIR).casefold().encode("utf-8")).hexdigest()[:20]
+    handle = kernel32.CreateMutexW(None, False, f"Local\\tdl-gui-{name_hash}")
+    if not handle:
+        return True
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _single_instance_handle = handle
+    return True
 
 # ANSI / control-character stripper
 _ANSI_RE = re.compile(
@@ -125,6 +238,10 @@ def _run_task(task):
     """Worker thread: run the subprocess and push output lines to the queue."""
     task.status = "running"
     try:
+        if task.stop_requested:
+            task.status = "stopped"
+            task.exit_code = -2
+            return
         task.process = subprocess.Popen(
             task.command,
             stdin=subprocess.PIPE,
@@ -137,13 +254,17 @@ def _run_task(task):
             errors="replace",
             bufsize=1,
         )
+        task.job_handle = _attach_kill_job(task.process)
         for line in iter(task.process.stdout.readline, ""):
             clean = strip_ansi(line).rstrip("\n")
             task.lines.append(clean)
             task.output_queue.put(("line", clean))
         task.process.wait()
         task.exit_code = task.process.returncode
-        task.status = "done" if task.exit_code == 0 else "error"
+        if task.stop_requested:
+            task.status = "stopped"
+        else:
+            task.status = "done" if task.exit_code == 0 else "error"
         if task.status == "done" and task.on_success:
             task.result = task.on_success()
             if isinstance(task.result, dict) and task.result.get("message"):
@@ -163,6 +284,8 @@ def _run_task(task):
         task.status = "error"
         task.exit_code = -1
     finally:
+        _close_win_handle(task.job_handle)
+        task.job_handle = None
         task.end_time = time.time()
         if task.on_finish:
             try:
@@ -231,36 +354,58 @@ def create_completed_task(command, label="", lines=None, result=None):
 
 
 def stop_task_process(task):
-    if not task or not task.process:
+    if not task:
         return False, "task not running"
-    pid = task.process.pid
+    task.stop_requested = True
+    if not task.process:
+        if task.status in ("pending", "running"):
+            return True, "正在停止任务"
+        return True, "任务已结束"
+    process = task.process
+    if process.poll() is not None:
+        return True, "任务已结束"
+    pid = process.pid
     try:
         if sys.platform == "win32":
             result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=8,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            if result.stdout:
-                for line in result.stdout.splitlines():
-                    clean = strip_ansi(line).strip()
-                    if clean:
-                        task.lines.append(clean)
-                        task.output_queue.put(("line", clean))
-            return result.returncode == 0, result.stdout.strip() or "taskkill finished"
-        task.process.terminate()
+            if result.returncode == 0 or process.poll() is not None:
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+                return True, "任务已停止"
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+                return True, "任务已停止"
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return False, "停止任务失败，请稍后重试"
+        process.terminate()
         try:
-            task.process.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            task.process.kill()
-        return True, "terminated"
+            process.kill()
+            process.wait(timeout=2)
+        return True, "任务已停止"
     except Exception as exc:
-        return False, str(exc)
+        if process.poll() is not None:
+            return True, "任务已结束"
+        return False, "停止任务失败，请稍后重试"
+
+
+def stop_all_tasks():
+    """Best-effort cleanup for normal shutdown; job handles cover hard exits."""
+    with tasks_lock:
+        active = [t for t in tasks.values() if t.status in ("pending", "running")]
+    for task in active:
+        stop_task_process(task)
 
 
 # ---------------------------------------------------------------------------
@@ -1232,7 +1377,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             task_id = path.split("/")[3]
             with tasks_lock:
                 task = tasks.get(task_id)
-            if task and task.process:
+            if task:
                 try:
                     ok, message = stop_task_process(task)
                     self._send_json({"ok": ok, "message": message})
@@ -1319,7 +1464,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     idx += 1
                 self.wfile.flush()
 
-                if task.status in ("done", "error") and idx >= len(task.lines):
+                if task.status in ("done", "error", "stopped") and idx >= len(task.lines):
                     payload = json.dumps(
                         {"type": "end", "status": task.status, "exit_code": task.exit_code},
                         ensure_ascii=False,
@@ -1348,7 +1493,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # stream new output
         while True:
-            if task.status in ("done", "error") and task.output_queue.empty():
+            if task.status in ("done", "error", "stopped") and task.output_queue.empty():
                 payload = json.dumps(
                     {"type": "end", "status": task.status, "exit_code": task.exit_code},
                     ensure_ascii=False,
@@ -1391,20 +1536,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
+class StrictThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+
 def find_port(host, start):
     import socket
     for port in range(start, start + 20):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind((host, port))
                 return port
         except OSError:
             continue
-    return start
+    raise OSError(f"No available port in range {start}-{start + 19}")
 
 
 def main():
+    if not acquire_single_instance():
+        print("[Error] tdl GUI 已经在运行，请使用现有窗口。")
+        return
+
     cfg = load_config()
     host = cfg.get("host", "127.0.0.1")
     port = find_port(host, int(cfg.get("port", 8765)))
@@ -1423,7 +1576,7 @@ def main():
     else:
         print(f"[Warning] tdl home not found: {home}")
 
-    server = http.server.ThreadingHTTPServer((host, port), Handler)
+    server = StrictThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}"
     print(f"\n  tdl GUI running at {url}")
     print("  Press Ctrl+C to stop.\n")
@@ -1435,11 +1588,14 @@ def main():
     except Exception:
         pass
 
+    atexit.register(stop_all_tasks)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down...")
-        server.shutdown()
+    finally:
+        stop_all_tasks()
+        server.server_close()
 
 
 if __name__ == "__main__":

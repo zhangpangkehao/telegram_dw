@@ -203,6 +203,23 @@ $env:USERPROFILE = 'D:\file\kaifa\project\ai\telegram_dw\tdl_home'
 
 确认 `tdl_home` 指向正确的 Home 目录，并检查 `<tdl_home>\.tdl\data` 中是否存在会话数据。更换 Home 目录后通常需要重新登录。
 
+### 提示“Current database is used by another process”
+
+这表示同一个 `tdl_home` 数据库仍被其他 `tdl.exe` 占用。旧版本在关闭项目黑窗口、强制结束 Python 服务或同时启动多个项目窗口时，可能留下后台 `tdl.exe`，导致后续操作被锁定。当前版本已增加以下保护：
+
+- 同一个项目只允许启动一个 GUI 服务；重复启动会直接提示使用已有窗口。
+- GUI 启动的 `tdl.exe` 会绑定到 Windows Job Object，关闭 GUI 时会自动结束子进程。
+- 正常停止任务和关闭服务时会主动清理子进程，避免数据库锁残留。
+
+如果升级前已经留下旧进程，请先在 PowerShell 中检查并结束它，再重新启动项目：
+
+```powershell
+Get-Process -Name tdl -ErrorAction SilentlyContinue
+Stop-Process -Name tdl -Force
+```
+
+确认没有正在运行的手动 `tdl` 登录或下载任务后再执行第二条命令。若锁提示消失但随后出现 `not authorized. please login first`，说明数据库已正常打开，只是当前 `tdl_home` 尚未登录；请按“完成登录”中的三种方法重新登录。
+
 ### 预览中显示“未下载”
 
 确认“记录预览”页填写的下载目录正确。程序会递归搜索该目录和导出 JSON 所在目录，并按文件名匹配本地文件。

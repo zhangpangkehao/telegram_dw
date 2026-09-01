@@ -27,7 +27,7 @@
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { height: 100vh; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
-.app { display: grid; grid-template-columns: 210px 1fr; grid-template-rows: 1fr 230px; grid-template-areas: "side main" "side console"; height: 100vh; }
+.app { --console-height: 230px; display: grid; grid-template-columns: 210px 1fr; grid-template-rows: minmax(0, 1fr) var(--console-height); grid-template-areas: "side main" "side console"; height: 100vh; }
 .sidebar { grid-area: side; background: var(--side); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
 .logo { padding: 18px 16px 14px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 17px; }
 .logo span { color: var(--accent); }
@@ -105,8 +105,12 @@ tr.selected td { background: var(--accent-soft); }
 .preview-modal-content img, .preview-modal-content video, .preview-modal-content audio { max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-modal-close { position: absolute; right: 0; top: 0; width: 38px; height: 38px; border: 0; border-radius: 50%; background: rgba(255,255,255,.94); color: #1f2937; cursor: pointer; font-size: 23px; z-index: 2; }
 .preview-modal-download { position: absolute; right: 48px; top: 0; text-decoration: none; }
-.console { grid-area: console; background: #ffffff; border-top: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: 0 -1px 2px rgba(15, 23, 42, .04); }
-.console.collapsed { height: 36px; }
+.console { grid-area: console; position: relative; min-height: 0; background: #ffffff; border-top: 1px solid var(--border); display: flex; flex-direction: column; box-shadow: 0 -1px 2px rgba(15, 23, 42, .04); }
+.console.collapsed { min-height: 0; overflow: hidden; }
+.console-resizer { position: absolute; z-index: 3; left: 0; right: 0; top: -5px; height: 10px; cursor: ns-resize; touch-action: none; }
+.console-resizer::after { content: ""; position: absolute; left: 50%; top: 4px; width: 42px; height: 2px; transform: translateX(-50%); background: var(--border); border-radius: 2px; opacity: 0; transition: opacity .15s ease, background .15s ease; }
+.console-resizer:hover::after, .app.resizing .console-resizer::after { opacity: 1; background: var(--accent); }
+.app.resizing, .app.resizing * { cursor: ns-resize !important; user-select: none !important; }
 .console-head { height: 36px; display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border-bottom: 1px solid var(--border); padding: 0 12px; color: var(--muted); font-size: 12px; }
 .console-actions { display: flex; gap: 6px; }
 .console-actions button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 3px 7px; }
@@ -121,7 +125,7 @@ tr.selected td { background: var(--accent-soft); }
 .toast { position: fixed; right: 16px; top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; z-index: 99; max-width: 360px; }
 .toast.success { border-color: var(--ok); }
 .toast.error { border-color: var(--bad); }
-@media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr 230px; grid-template-areas: "side" "main" "console"; } .sidebar { max-height: 190px; } .nav { display: flex; flex-wrap: wrap; } .nav button { width: auto; } .row { flex-direction: column; gap: 0; } .preview-toolbar { grid-template-columns: 1fr; } .preview-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } }
+@media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) var(--console-height); grid-template-areas: "side" "main" "console"; } .sidebar { max-height: 190px; } .nav { display: flex; flex-wrap: wrap; } .nav button { width: auto; } .row { flex-direction: column; gap: 0; } .preview-toolbar { grid-template-columns: 1fr; } .preview-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } }
 </style>
 </head>
 <body>
@@ -374,6 +378,7 @@ tr.selected td { background: var(--accent-soft); }
   </main>
 
   <section id="console" class="console">
+    <div id="console-resizer" class="console-resizer" title="拖动调整控制台高度"></div>
     <div class="console-head">
       <div>控制台 <span id="console-task-label" style="color:var(--accent);"></span></div>
       <div class="console-actions"><button onclick="clearConsole()">清空</button><button onclick="toggleConsole()">折叠</button></div>
@@ -391,6 +396,8 @@ let selectedChat = null;
 let chatData = [];
 let previewData = [];
 let previewFilter = 'all';
+let consoleHeight = 230;
+let consoleExpandedHeight = 230;
 
 function $(id) { return document.getElementById(id); }
 function val(id) { return $(id) ? $(id).value.trim() : ''; }
@@ -403,7 +410,9 @@ function getSeg(id) { const active = $(id).querySelector('button.active'); retur
 
 function appendConsole(text, cls) { const div = document.createElement('div'); div.className = 'line ' + (cls || ''); div.textContent = text; $('console-body').appendChild(div); $('console-body').scrollTop = $('console-body').scrollHeight; }
 function clearConsole() { $('console-body').innerHTML = ''; }
-function toggleConsole() { $('console').classList.toggle('collapsed'); }
+function applyConsoleHeight(height) { const max = Math.max(120, Math.floor(window.innerHeight * .72)); consoleHeight = Math.max(36, Math.min(max, Math.round(height))); document.querySelector('.app').style.setProperty('--console-height', consoleHeight + 'px'); }
+function toggleConsole() { const collapsed = $('console').classList.toggle('collapsed'); if (collapsed) { if (consoleHeight > 36) consoleExpandedHeight = consoleHeight; applyConsoleHeight(36); } else { applyConsoleHeight(consoleExpandedHeight || 230); } }
+function setupConsoleResize() { const app = document.querySelector('.app'); const handle = $('console-resizer'); let startY = 0; let startHeight = 0; const beginResize = clientY => { if ($('console').classList.contains('collapsed')) { $('console').classList.remove('collapsed'); applyConsoleHeight(consoleExpandedHeight || 230); } startY = clientY; startHeight = consoleHeight; app.classList.add('resizing'); }; const moveResize = clientY => { if (!app.classList.contains('resizing')) return; applyConsoleHeight(startHeight + startY - clientY); consoleExpandedHeight = consoleHeight; }; const stopResize = () => { if (!app.classList.contains('resizing')) return; app.classList.remove('resizing'); localStorage.setItem('tdl-console-height', String(consoleExpandedHeight)); }; handle.addEventListener('mousedown', event => { beginResize(event.clientY); event.preventDefault(); }); window.addEventListener('mousemove', event => moveResize(event.clientY)); window.addEventListener('mouseup', stopResize); handle.addEventListener('touchstart', event => { beginResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchmove', event => { if (!app.classList.contains('resizing')) return; moveResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchend', stopResize); const saved = Number(localStorage.getItem('tdl-console-height')); applyConsoleHeight(Number.isFinite(saved) && saved >= 80 ? saved : 230); consoleExpandedHeight = consoleHeight; window.addEventListener('resize', () => applyConsoleHeight($('console').classList.contains('collapsed') ? 36 : consoleExpandedHeight)); }
 function setTaskStatus(running, label) { $('task-dot').className = 'dot ' + (running ? 'run' : ''); $('task-text').textContent = running ? (label || '运行中') : '空闲'; $('console-task-label').textContent = label ? '｜' + label : ''; }
 
 function setupTabs() {
@@ -444,11 +453,17 @@ async function clearDownloadHistory() { if (!confirm('确定清空全部下载�
 function connectStream(taskId, onEnd) {
   if (currentEventSource) currentEventSource.close();
   currentTaskId = taskId;
+  let sessionRejected = false;
   currentEventSource = new EventSource('/api/stream/' + taskId);
   currentEventSource.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === 'line') {
       const lower = String(data.data).toLowerCase();
+      if (lower.includes('not authorized') || lower.includes('please login first')) {
+        sessionRejected = true;
+        $('login-dot').className = 'dot';
+        $('login-text').textContent = '未登录';
+      }
       const cls = lower.includes('error') || lower.includes('panic') || lower.includes('fatal') ? 'error' : (lower.includes('complete') || lower.includes('success') || lower.includes('done') ? 'success' : '');
       appendConsole(data.data, cls);
     }
@@ -457,8 +472,9 @@ function connectStream(taskId, onEnd) {
       setTaskStatus(false);
       currentEventSource.close();
       currentEventSource = null;
+      currentTaskId = null;
       if (onEnd) onEnd(data, taskId);
-      checkLoginStatus();
+      if (!sessionRejected) checkLoginStatus();
     }
     if (data.type === 'error') appendConsole('[错误：' + (data.message || '未知') + ']', 'error');
   };
@@ -466,7 +482,7 @@ function connectStream(taskId, onEnd) {
 
 async function startTask(endpoint, body, label, onEnd) { const r = await fetch('/api/' + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!data.task_id) { const message = data.error || '启动任务失败'; appendConsole('[启动失败：' + message + ']', 'error'); toast(message, 'error'); return null; } appendConsole('$ ' + (data.command || []).join(' '), 'cmd'); if (data.history && data.history.enabled) appendConsole('[下载记录] 已跳过 ' + data.history.skipped + ' 条，待处理 ' + data.history.pending + ' 条。', 'info'); setTaskStatus(true, label); connectStream(data.task_id, result => { loadDownloadHistory(); if (onEnd) onEnd(result, data.task_id); }); return data.task_id; }
 async function sendInput() { if (!currentTaskId || !val('console-input')) return; await fetch('/api/task/' + currentTaskId + '/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: val('console-input') }) }); appendConsole('> ' + val('console-input'), 'info'); setVal('console-input', ''); }
-async function stopTask() { if (!currentTaskId) return; const r = await fetch('/api/task/' + currentTaskId + '/stop', { method: 'POST' }); const data = await r.json(); toast(data.ok ? '任务已停止' : (data.error || data.message || '停止失败'), data.ok ? 'warning' : 'error'); }
+async function stopTask() { if (!currentTaskId) return toast('当前没有正在运行的任务', 'warning'); try { const r = await fetch('/api/task/' + currentTaskId + '/stop', { method: 'POST' }); const data = await r.json(); toast(data.ok ? (data.message || '任务已停止') : (data.error || data.message || '停止失败'), data.ok ? 'warning' : 'error'); } catch { toast('无法连接到后台服务', 'error'); } }
 
 function doLogin() { const type = getSeg('login-type-seg'); const body = { type }; if (type === 'desktop') { body.desktop_path = val('login-desktop-path'); body.passcode = val('login-passcode'); } startTask('login', body, '登录', data => toast(data.status === 'done' ? '登录成功' : '登录失败', data.status === 'done' ? 'success' : 'error')); }
 async function listChats() { appendConsole('正在获取聊天列表...', 'info'); await startTask('chats', { filter: val('chat-filter') || 'true' }, '聊天列表', (data, taskId) => data.status === 'done' ? parseChatList(taskId) : toast('获取聊天列表失败', 'error')); }
@@ -537,7 +553,7 @@ function doUsers() { const body = { chat: val('users-chat'), output: val('users-
 
 function downloadExportFile() { const output = val('exp-output') || 'tdl-export.json'; window.open('/api/file?path=' + encodeURIComponent(output), '_blank'); return false; }
 function setupPreviewFilters() { document.querySelectorAll('.preview-filters button').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.preview-filters button').forEach(b => b.classList.toggle('active', b === button)); previewFilter = button.dataset.filter; renderPreview(); })); }
-async function init() { setupTabs(); setupSegments(); setupPreviewFilters(); toggleLoginType(); toggleDownloadMode(); toggleQuickType(); toggleExpType(); await loadConfig(); checkLoginStatus(); loadVersion(); loadDownloadHistory(); }
+async function init() { setupTabs(); setupSegments(); setupPreviewFilters(); setupConsoleResize(); toggleLoginType(); toggleDownloadMode(); toggleQuickType(); toggleExpType(); await loadConfig(); checkLoginStatus(); loadVersion(); loadDownloadHistory(); }
 init();
 </script>
 <div id="preview-modal" class="preview-modal" onclick="closePreviewModal(event)"><div id="preview-modal-content" class="preview-modal-content"><button class="preview-modal-close" aria-label="关闭预览">&times;</button></div></div>
