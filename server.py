@@ -28,10 +28,11 @@ from urllib.parse import parse_qs, quote, urlparse
 BASE_DIR = Path(__file__).parent.resolve()
 CONFIG_FILE = BASE_DIR / "config.json"
 INDEX_FILE = BASE_DIR / "index.html"
+DOWNLOAD_HISTORY_FILE = BASE_DIR / ".tdl-download-history.json"
 
 DEFAULT_CONFIG = {
     "tdl_path": r"D:\ruanjian\ruanjian\tdl_Windows_64bit\tdl.exe",
-    "tdl_home": r"D:\ruanjian\ruanjian\tdl_Windows_64bit\tdl_home",
+    "tdl_home": r"D:\file\kaifa\project\ai\telegram_dw\tdl_home",
     "namespace": "default",
     "proxy": "",
     "pool": 8,
@@ -43,12 +44,19 @@ DEFAULT_CONFIG = {
 }
 
 
+def normalize_tdl_path(value):
+    """Return a Windows-friendly executable path from a saved UI value."""
+    return os.path.normpath(str(value or "").strip().strip('"'))
+
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            return {**DEFAULT_CONFIG, **saved}
+            merged = {**DEFAULT_CONFIG, **saved}
+            merged["tdl_path"] = normalize_tdl_path(merged.get("tdl_path"))
+            return merged
         except Exception:
             pass
     return DEFAULT_CONFIG.copy()
@@ -56,6 +64,7 @@ def load_config():
 
 def save_config(cfg):
     merged = {**DEFAULT_CONFIG, **cfg}
+    merged["tdl_path"] = normalize_tdl_path(merged.get("tdl_path"))
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
     return merged
@@ -66,7 +75,17 @@ def save_config(cfg):
 # ---------------------------------------------------------------------------
 
 class Task:
-    def __init__(self, task_id, command, env, label="", cleanup_paths=None):
+    def __init__(
+        self,
+        task_id,
+        command,
+        env,
+        label="",
+        cleanup_paths=None,
+        on_success=None,
+        initial_lines=None,
+        on_finish=None,
+    ):
         self.id = task_id
         self.command = command
         self.env = env
@@ -75,17 +94,20 @@ class Task:
         self.output_queue = queue.Queue()
         self.status = "pending"  # pending, running, done, error
         self.exit_code = None
-        self.lines = []
+        self.lines = list(initial_lines or [])
         self.start_time = time.time()
         self.end_time = None
         self.result = None  # optional parsed result (e.g. chat list JSON)
         self.cleanup_paths = list(cleanup_paths or [])
+        self.on_success = on_success
+        self.on_finish = on_finish
 
 
 tasks = {}
 tasks_lock = threading.Lock()
 preview_files = {}
 preview_files_lock = threading.Lock()
+download_history_lock = threading.Lock()
 
 # ANSI / control-character stripper
 _ANSI_RE = re.compile(
@@ -122,6 +144,12 @@ def _run_task(task):
         task.process.wait()
         task.exit_code = task.process.returncode
         task.status = "done" if task.exit_code == 0 else "error"
+        if task.status == "done" and task.on_success:
+            task.result = task.on_success()
+            if isinstance(task.result, dict) and task.result.get("message"):
+                message = str(task.result["message"])
+                task.lines.append(message)
+                task.output_queue.put(("line", message))
     except FileNotFoundError:
         msg = f"[Error] tdl executable not found: {task.command[0]}"
         task.lines.append(msg)
@@ -136,6 +164,18 @@ def _run_task(task):
         task.exit_code = -1
     finally:
         task.end_time = time.time()
+        if task.on_finish:
+            try:
+                finish_result = task.on_finish(task.status, task.exit_code)
+                if finish_result is not None:
+                    task.result = finish_result
+                if isinstance(finish_result, dict) and finish_result.get("message"):
+                    message = str(finish_result["message"])
+                    task.lines.append(message)
+                    task.output_queue.put(("line", message))
+            except Exception as exc:
+                task.lines.append(f"[下载记录] 回填失败：{exc}")
+                task.output_queue.put(("line", task.lines[-1]))
         task.output_queue.put(("end", {"status": task.status, "exit_code": task.exit_code}))
         for path in task.cleanup_paths:
             try:
@@ -144,9 +184,26 @@ def _run_task(task):
                 pass
 
 
-def create_task(command, env, label="", cleanup_paths=None):
+def create_task(
+    command,
+    env,
+    label="",
+    cleanup_paths=None,
+    on_success=None,
+    initial_lines=None,
+    on_finish=None,
+):
     task_id = uuid.uuid4().hex[:12]
-    task = Task(task_id, command, env, label, cleanup_paths)
+    task = Task(
+        task_id,
+        command,
+        env,
+        label,
+        cleanup_paths,
+        on_success,
+        initial_lines,
+        on_finish,
+    )
     with tasks_lock:
         active = next((t for t in tasks.values() if t.status in ("pending", "running")), None)
         if active:
@@ -154,6 +211,22 @@ def create_task(command, env, label="", cleanup_paths=None):
         tasks[task_id] = task
     t = threading.Thread(target=_run_task, args=(task,), daemon=True)
     t.start()
+    return task_id, None
+
+
+def create_completed_task(command, label="", lines=None, result=None):
+    """Create an already-completed task so the browser can consume normal SSE."""
+    task_id = uuid.uuid4().hex[:12]
+    task = Task(task_id, command, {}, label, initial_lines=lines)
+    task.status = "done"
+    task.exit_code = 0
+    task.end_time = time.time()
+    task.result = result
+    with tasks_lock:
+        active = next((t for t in tasks.values() if t.status in ("pending", "running")), None)
+        if active:
+            return None, f"已有任务正在运行：{active.label or active.id}，请先停止或等待结束"
+        tasks[task_id] = task
     return task_id, None
 
 
@@ -230,7 +303,7 @@ def _global_args(cfg, body=None):
 
 
 def _tdl(cfg):
-    return [cfg["tdl_path"]]
+    return [normalize_tdl_path(cfg.get("tdl_path"))]
 
 
 # -- Login -----------------------------------------------------------------
@@ -416,7 +489,7 @@ def get_version(cfg):
     try:
         env = build_env(cfg)
         result = subprocess.run(
-            [cfg["tdl_path"], "version"],
+            [normalize_tdl_path(cfg.get("tdl_path")), "version"],
             capture_output=True,
             text=True,
             env=env,
@@ -463,6 +536,326 @@ def _export_groups(payload):
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict) and isinstance(item.get("messages"), list)]
     return []
+
+
+def _empty_download_history():
+    return {"version": 1, "items": {}}
+
+
+def _load_download_history_unlocked():
+    if not DOWNLOAD_HISTORY_FILE.is_file():
+        return _empty_download_history()
+    try:
+        with DOWNLOAD_HISTORY_FILE.open("r", encoding="utf-8-sig") as stream:
+            payload = json.load(stream)
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict):
+            return _empty_download_history()
+        return {"version": 1, "items": payload["items"]}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return _empty_download_history()
+
+
+def load_download_history():
+    with download_history_lock:
+        return _load_download_history_unlocked()
+
+
+def download_history_summary():
+    history = load_download_history()
+    return {
+        "count": len(history["items"]),
+        "path": str(DOWNLOAD_HISTORY_FILE),
+    }
+
+
+def clear_download_history():
+    with download_history_lock:
+        DOWNLOAD_HISTORY_FILE.unlink(missing_ok=True)
+    return {"count": 0, "path": str(DOWNLOAD_HISTORY_FILE)}
+
+
+def _download_history_key(group, message):
+    chat_id = group.get("id") or group.get("chat_id") or group.get("dialog_id")
+    message_id = message.get("id") or message.get("message_id")
+    if chat_id is not None and message_id is not None:
+        return f"telegram:{chat_id}:{message_id}"
+    stable = json.dumps(
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "file": _message_file(message),
+            "message": message,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _parse_extensions(value):
+    if isinstance(value, (list, tuple, set)):
+        parts = value
+    else:
+        parts = str(value or "").split(",")
+    return {str(part).strip().lstrip(".").casefold() for part in parts if str(part).strip()}
+
+
+def _message_matches_download_filters(message, body):
+    filename = _message_file(message)
+    if not filename:
+        return False
+    extension = Path(filename).suffix.lstrip(".").casefold()
+    included = _parse_extensions(body.get("include"))
+    excluded = _parse_extensions(body.get("exclude"))
+    if included and extension not in included:
+        return False
+    if excluded and extension in excluded:
+        return False
+    return True
+
+
+def _history_record(group, message, source):
+    return {
+        "key": _download_history_key(group, message),
+        "chat_id": group.get("id") or group.get("chat_id") or group.get("dialog_id"),
+        "message_id": message.get("id") or message.get("message_id"),
+        "filename": _message_file(message),
+        "source": str(source),
+    }
+
+
+def _download_file_index(download_dir):
+    """Index completed files using tdl's default chat/message filename form."""
+    root = _resolve_user_path(download_dir or "downloads")
+    exact = {}
+    by_message = {}
+    by_dialog_message = {}
+    if not root.is_dir():
+        return exact, by_message, by_dialog_message
+    try:
+        paths = root.rglob("*")
+        for path in paths:
+            try:
+                if not path.is_file() or path.suffix.casefold() in {".tmp", ".part", ".temp"}:
+                    continue
+                if path.stat().st_size <= 0:
+                    continue
+            except OSError:
+                continue
+            name = path.name.casefold()
+            exact.setdefault(name, []).append(path)
+            parts = path.name.split("_", 2)
+            if len(parts) < 3 or not parts[1].lstrip("-").isdigit():
+                continue
+            message_id = parts[1]
+            by_message.setdefault(message_id, []).append(path)
+            by_dialog_message.setdefault((parts[0], message_id), []).append(path)
+    except OSError:
+        return exact, by_message, by_dialog_message
+    return exact, by_message, by_dialog_message
+
+
+def _records_with_existing_files(records, download_dir):
+    """Return records whose final (not .tmp) files already exist on disk."""
+    exact, by_message, by_dialog_message = _download_file_index(download_dir)
+    matched = []
+    for record in records:
+        filename = Path(str(record.get("filename") or "")).name.casefold()
+        if not filename:
+            continue
+        candidates = list(exact.get(filename, []))
+        message_id = str(record.get("message_id") or "")
+        chat_id = str(record.get("chat_id") or "")
+        if not candidates and message_id:
+            candidates = list(by_dialog_message.get((chat_id, message_id), []))
+            if not candidates:
+                candidates = list(by_message.get(message_id, []))
+            if len(candidates) > 1:
+                extension = Path(filename).suffix.casefold()
+                same_extension = [item for item in candidates if item.suffix.casefold() == extension]
+                if same_extension:
+                    candidates = same_extension
+        if candidates:
+            matched.append(record)
+    return matched
+
+
+def record_download_history(records):
+    unique = {record["key"]: dict(record) for record in records}
+    recorded_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with download_history_lock:
+        history = _load_download_history_unlocked()
+        for key, record in unique.items():
+            record.pop("key", None)
+            record["recorded_at"] = recorded_at
+            history["items"][key] = record
+        DOWNLOAD_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = DOWNLOAD_HISTORY_FILE.with_name(
+            DOWNLOAD_HISTORY_FILE.name + f".{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with temp_path.open("w", encoding="utf-8") as stream:
+                json.dump(history, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, DOWNLOAD_HISTORY_FILE)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    count = len(unique)
+    total = len(history["items"])
+    return {
+        "recorded": count,
+        "total": total,
+        "message": f"[下载记录] 已持久化 {count} 条，本地文件被移走后仍会跳过。",
+    }
+
+
+def prepare_history_download(body):
+    """Filter previously completed messages out of tdl export JSON inputs."""
+    prepared_body = dict(body)
+    if body.get("mode", "url") != "file":
+        return prepared_body, [], [], {"enabled": False, "skipped": 0, "pending": 0}
+
+    files = body.get("files", [])
+    if isinstance(files, str):
+        files = [item.strip() for item in files.splitlines() if item.strip()]
+    if not files:
+        return prepared_body, [], [], {"enabled": True, "skipped": 0, "pending": 0}
+
+    # Continue should keep the persistent-history filter. Only an explicit
+    # restart is allowed to send previously recorded messages to tdl again.
+    bypass_history = bool(body.get("restart"))
+    prepared_files = []
+    cleanup_paths = []
+    records = []
+    skipped = 0
+    supported_sources = 0
+    sources = []
+    candidates = []
+
+    for value in files:
+        source_path = _resolve_user_path(value)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Export JSON not found: {source_path}")
+        with source_path.open("r", encoding="utf-8-sig") as stream:
+            payload = json.load(stream)
+        groups = _export_groups(payload)
+        if not groups:
+            prepared_files.append(str(source_path))
+            continue
+
+        supported_sources += 1
+        sources.append((source_path, payload, groups))
+        if not bypass_history:
+            for group in groups:
+                for message in group.get("messages", []):
+                    if isinstance(message, dict) and _message_matches_download_filters(message, body):
+                        candidates.append(_history_record(group, message, source_path))
+
+    if candidates and not bypass_history:
+        existing = _records_with_existing_files(candidates, body.get("dir") or "downloads")
+        if existing:
+            record_download_history(existing)
+    history_items = load_download_history()["items"]
+
+    for source_path, payload, groups in sources:
+        source_pending = 0
+        source_selected = 0
+        for group in groups:
+            kept_messages = []
+            for message in group.get("messages", []):
+                if not isinstance(message, dict) or not _message_matches_download_filters(message, body):
+                    kept_messages.append(message)
+                    continue
+                source_selected += 1
+                record = _history_record(group, message, source_path)
+                if not bypass_history and record["key"] in history_items:
+                    skipped += 1
+                    continue
+                records.append(record)
+                source_pending += 1
+                kept_messages.append(message)
+            group["messages"] = kept_messages
+
+        if bypass_history:
+            prepared_files.append(str(source_path))
+        elif source_pending:
+            temp_path = BASE_DIR / f".download-history-{uuid.uuid4().hex}.json"
+            with temp_path.open("w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False)
+            prepared_files.append(str(temp_path))
+            cleanup_paths.append(temp_path)
+        elif source_selected == 0:
+            prepared_files.append(str(source_path))
+
+    prepared_body["files"] = prepared_files
+    stats = {
+        "enabled": supported_sources > 0,
+        "skipped": skipped,
+        "pending": len(records),
+        "all_skipped": supported_sources > 0 and skipped > 0 and not prepared_files,
+        "bypassed": bypass_history,
+    }
+    return prepared_body, records, cleanup_paths, stats
+
+
+def create_download_task(cfg, body):
+    prepared_body, records, cleanup_paths, stats = prepare_history_download(body)
+    if prepared_body.get("mode", "url") == "file" and not prepared_body.get("restart"):
+        prepared_body["skip_same"] = True
+    command, label = cmd_download(cfg, prepared_body)
+    initial_lines = []
+    if stats.get("enabled"):
+        if stats.get("bypassed"):
+            initial_lines.append(
+                f"[下载记录] 已按“重新开始”要求绕过历史跳过规则，本次跟踪 {stats['pending']} 条。"
+            )
+        else:
+            initial_lines.append(
+                f"[下载记录] 已跳过 {stats['skipped']} 条历史记录，待下载 {stats['pending']} 条。"
+            )
+
+    if stats.get("all_skipped"):
+        display_command, _ = cmd_download(cfg, body)
+        lines = initial_lines + ["[下载记录] 所有项目均已下载过，本次无需重新下载。"]
+        task_id, error = create_completed_task(
+            display_command,
+            label,
+            lines,
+            {"history": stats},
+        )
+        return task_id, error, display_command, stats
+
+    def finalize_download(status, exit_code):
+        # Verify the final files for every exit status. A stopped or failed
+        # task may have completed some files, while a successful task should
+        # never mark a missing output as downloaded.
+        completed = _records_with_existing_files(
+            records,
+            prepared_body.get("dir") or "downloads",
+        )
+        if not completed:
+            return {"recorded": 0, "total": download_history_summary()["count"]}
+        result = record_download_history(completed)
+        result["message"] = (
+            f"[下载记录] 本次任务结束（退出码 {exit_code}），已确认并记录 {result['recorded']} 个已完成文件。"
+        )
+        return result
+
+    task_id, error = create_task(
+        command,
+        build_env(cfg),
+        label,
+        cleanup_paths,
+        initial_lines=initial_lines,
+        on_finish=finalize_download if records else None,
+    )
+    if error:
+        for path in cleanup_paths:
+            Path(path).unlink(missing_ok=True)
+    return task_id, error, command, stats
 
 
 def _message_file(message):
@@ -514,6 +907,7 @@ def build_preview(export_file, download_dir):
     if not groups:
         raise ValueError("The JSON file does not contain a supported tdl message list")
 
+    history_items = load_download_history()["items"]
     items = []
     filenames = []
     for group_index, group in enumerate(groups):
@@ -535,6 +929,7 @@ def build_preview(export_file, download_dir):
                 "kind": kind,
                 "mime": mime,
                 "text": message.get("content") or message.get("text") or message.get("caption") or "",
+                "history_recorded": _download_history_key(group, message) in history_items,
             })
 
     dl_path = _resolve_user_path(download_dir or "downloads")
@@ -587,7 +982,14 @@ def create_preview_download(cfg, body):
         "threads": body.get("threads") or cfg.get("threads", 4),
         "skip_same": True,
     })
-    task_id, error = create_task(command, build_env(cfg), f"Download {_message_file(message)}", [temp_path])
+    history_record = _history_record(groups[group_index], message, export_path)
+    task_id, error = create_task(
+        command,
+        build_env(cfg),
+        f"Download {_message_file(message)}",
+        [temp_path],
+        lambda: record_download_history([history_record]),
+    )
     if error:
         temp_path.unlink(missing_ok=True)
     return task_id, error, command
@@ -679,6 +1081,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"logged_in": check_login(cfg)})
             return
 
+        if path == "/api/download-history":
+            self._send_json(download_history_summary())
+            return
+
         if path.startswith("/api/preview/media/"):
             token = path.rsplit("/", 1)[-1]
             with preview_files_lock:
@@ -730,6 +1136,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "exit_code": task.exit_code,
                     "command": task.command,
                     "lines": task.lines,
+                    "result": task.result,
                 }
             )
             return
@@ -774,8 +1181,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 400)
             return
 
+        if path == "/api/download-history/clear":
+            self._send_json({"ok": True, **clear_download_history()})
+            return
+
+        if path == "/api/download":
+            body = self._read_body()
+            try:
+                tid, error, command, history = create_download_task(cfg, body)
+                if error:
+                    self._send_json({"error": error, "command": command, "history": history}, 409)
+                    return
+                self._send_json({"task_id": tid, "command": command, "history": history})
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, 400)
+            return
+
         # task-starting endpoints
         for name, builder in COMMAND_BUILDERS.items():
+            if name == "download":
+                continue
             if path == f"/api/{name}":
                 body = self._read_body()
                 cmd, label = builder(cfg, body)
@@ -985,7 +1410,7 @@ def main():
     port = find_port(host, int(cfg.get("port", 8765)))
 
     # validate tdl path
-    tdl = Path(cfg.get("tdl_path", ""))
+    tdl = Path(normalize_tdl_path(cfg.get("tdl_path")))
     if not tdl.exists():
         print(f"[Warning] tdl.exe not found at: {tdl}")
         print("          You can change the path in the Settings tab.")

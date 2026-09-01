@@ -7,3 +7,4 @@ venv/
 *.log
 *.log.gz
 tdl-quick-export*.json
+.tdl-download-history.json
