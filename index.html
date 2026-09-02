@@ -398,6 +398,12 @@ let previewData = [];
 let previewFilter = 'all';
 let consoleHeight = 230;
 let consoleExpandedHeight = 230;
+const CONSOLE_MAX_LINES = 1200;
+const CONSOLE_MAX_PENDING = 2400;
+const CONSOLE_FLUSH_SIZE = 240;
+let consolePending = [];
+let consoleFlushScheduled = false;
+let consoleOmitted = 0;
 
 function $(id) { return document.getElementById(id); }
 function val(id) { return $(id) ? $(id).value.trim() : ''; }
@@ -408,8 +414,14 @@ function toast(message, type) { const t = document.createElement('div'); t.class
 function toggleCollapse(id) { const el = $(id); if (el) el.classList.toggle('open'); }
 function getSeg(id) { const active = $(id).querySelector('button.active'); return active ? active.dataset.val : null; }
 
-function appendConsole(text, cls) { const div = document.createElement('div'); div.className = 'line ' + (cls || ''); div.textContent = text; $('console-body').appendChild(div); $('console-body').scrollTop = $('console-body').scrollHeight; }
-function clearConsole() { $('console-body').innerHTML = ''; }
+function consoleClass(text) { const lower = String(text).toLowerCase(); return lower.includes('error') || lower.includes('panic') || lower.includes('fatal') ? 'error' : (lower.includes('complete') || lower.includes('success') || lower.includes('done') ? 'success' : ''); }
+function scheduleConsoleFlush() { if (consoleFlushScheduled) return; consoleFlushScheduled = true; requestAnimationFrame(flushConsole); }
+function updateConsoleOmitted(body) { let marker = body.querySelector('[data-console-omitted]'); if (!consoleOmitted) { if (marker) marker.remove(); return; } if (!marker) { marker = document.createElement('div'); marker.className = 'line system'; marker.dataset.consoleOmitted = '1'; body.prepend(marker); } marker.textContent = '[控制台] 为保持页面流畅，已省略较早的 ' + consoleOmitted + ' 行输出。'; }
+function trimConsole(body) { let regular = body.childElementCount - (body.querySelector('[data-console-omitted]') ? 1 : 0); while (regular > CONSOLE_MAX_LINES) { let first = body.firstElementChild; if (first && first.hasAttribute('data-console-omitted')) first = first.nextElementSibling; if (!first) break; first.remove(); regular--; consoleOmitted++; } updateConsoleOmitted(body); }
+function flushConsole() { consoleFlushScheduled = false; if (!consolePending.length) return; const body = $('console-body'); const stickToBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48; const fragment = document.createDocumentFragment(); const batch = consolePending.splice(0, CONSOLE_FLUSH_SIZE); for (const item of batch) { const div = document.createElement('div'); div.className = 'line ' + (item.cls || ''); div.textContent = item.text; fragment.appendChild(div); } body.appendChild(fragment); trimConsole(body); if (stickToBottom) body.scrollTop = body.scrollHeight; if (consolePending.length) scheduleConsoleFlush(); }
+function appendConsole(text, cls) { consolePending.push({ text: String(text), cls: cls || '' }); if (consolePending.length > CONSOLE_MAX_PENDING) { const excess = consolePending.length - CONSOLE_MAX_PENDING; consolePending.splice(0, excess); consoleOmitted += excess; } scheduleConsoleFlush(); }
+function appendConsoleLines(lines) { const items = (lines || []).map(text => ({ text: String(text), cls: consoleClass(text) })); if (!items.length) return; consolePending.push(...items); if (consolePending.length > CONSOLE_MAX_PENDING) { const excess = consolePending.length - CONSOLE_MAX_PENDING; consolePending.splice(0, excess); consoleOmitted += excess; } scheduleConsoleFlush(); }
+function clearConsole() { consolePending = []; consoleOmitted = 0; $('console-body').innerHTML = ''; }
 function applyConsoleHeight(height) { const max = Math.max(120, Math.floor(window.innerHeight * .72)); consoleHeight = Math.max(36, Math.min(max, Math.round(height))); document.querySelector('.app').style.setProperty('--console-height', consoleHeight + 'px'); }
 function toggleConsole() { const collapsed = $('console').classList.toggle('collapsed'); if (collapsed) { if (consoleHeight > 36) consoleExpandedHeight = consoleHeight; applyConsoleHeight(36); } else { applyConsoleHeight(consoleExpandedHeight || 230); } }
 function setupConsoleResize() { const app = document.querySelector('.app'); const handle = $('console-resizer'); let startY = 0; let startHeight = 0; const beginResize = clientY => { if ($('console').classList.contains('collapsed')) { $('console').classList.remove('collapsed'); applyConsoleHeight(consoleExpandedHeight || 230); } startY = clientY; startHeight = consoleHeight; app.classList.add('resizing'); }; const moveResize = clientY => { if (!app.classList.contains('resizing')) return; applyConsoleHeight(startHeight + startY - clientY); consoleExpandedHeight = consoleHeight; }; const stopResize = () => { if (!app.classList.contains('resizing')) return; app.classList.remove('resizing'); localStorage.setItem('tdl-console-height', String(consoleExpandedHeight)); }; handle.addEventListener('mousedown', event => { beginResize(event.clientY); event.preventDefault(); }); window.addEventListener('mousemove', event => moveResize(event.clientY)); window.addEventListener('mouseup', stopResize); handle.addEventListener('touchstart', event => { beginResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchmove', event => { if (!app.classList.contains('resizing')) return; moveResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchend', stopResize); const saved = Number(localStorage.getItem('tdl-console-height')); applyConsoleHeight(Number.isFinite(saved) && saved >= 80 ? saved : 230); consoleExpandedHeight = consoleHeight; window.addEventListener('resize', () => applyConsoleHeight($('console').classList.contains('collapsed') ? 36 : consoleExpandedHeight)); }
@@ -457,15 +469,15 @@ function connectStream(taskId, onEnd) {
   currentEventSource = new EventSource('/api/stream/' + taskId);
   currentEventSource.onmessage = event => {
     const data = JSON.parse(event.data);
-    if (data.type === 'line') {
-      const lower = String(data.data).toLowerCase();
+    if (data.type === 'line' || data.type === 'lines') {
+      const lines = data.type === 'lines' ? (data.data || []) : [data.data];
+      const lower = lines.join('\n').toLowerCase();
       if (lower.includes('not authorized') || lower.includes('please login first')) {
         sessionRejected = true;
         $('login-dot').className = 'dot';
         $('login-text').textContent = '未登录';
       }
-      const cls = lower.includes('error') || lower.includes('panic') || lower.includes('fatal') ? 'error' : (lower.includes('complete') || lower.includes('success') || lower.includes('done') ? 'success' : '');
-      appendConsole(data.data, cls);
+      appendConsoleLines(lines);
     }
     if (data.type === 'end') {
       appendConsole('[任务结束：' + data.status + '，退出码 ' + data.exit_code + ']', 'system');
