@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import threading
+import queue
 import time
 import uuid
 import webbrowser
@@ -30,8 +31,6 @@ CONFIG_FILE = BASE_DIR / "config.json"
 INDEX_FILE = BASE_DIR / "index.html"
 DOWNLOAD_HISTORY_FILE = BASE_DIR / ".tdl-download-history.json"
 INSTANCE_FILE = BASE_DIR / ".tdl-gui-instance.json"
-DOWNLOAD_TASK_MAX_LINES = 4000
-SSE_BATCH_LINES = 250
 
 DEFAULT_CONFIG = {
     "tdl_path": r"D:\ruanjian\ruanjian\tdl_Windows_64bit\tdl.exe",
@@ -88,7 +87,6 @@ class Task:
         on_success=None,
         initial_lines=None,
         on_finish=None,
-        max_lines=None,
     ):
         self.id = task_id
         self.command = command
@@ -96,36 +94,17 @@ class Task:
         self.label = label
         self.process = None
         self.job_handle = None
+        self.output_queue = queue.Queue()
         self.status = "pending"  # pending, running, done, error, stopped
         self.exit_code = None
         self.stop_requested = False
         self.lines = list(initial_lines or [])
-        self.lines_dropped = 0
-        self.lines_lock = threading.Lock()
-        self.max_lines = max_lines
-        self.finished = threading.Event()
         self.start_time = time.time()
         self.end_time = None
         self.result = None  # optional parsed result (e.g. chat list JSON)
         self.cleanup_paths = list(cleanup_paths or [])
         self.on_success = on_success
         self.on_finish = on_finish
-
-    def add_line(self, line):
-        with self.lines_lock:
-            self.lines.append(line)
-            if self.max_lines and len(self.lines) > self.max_lines:
-                overflow = len(self.lines) - self.max_lines
-                del self.lines[:overflow]
-                self.lines_dropped += overflow
-
-    def output_snapshot(self):
-        with self.lines_lock:
-            return self.lines_dropped, list(self.lines)
-
-    def output_count(self):
-        with self.lines_lock:
-            return self.lines_dropped + len(self.lines)
 
 
 tasks = {}
@@ -382,7 +361,7 @@ def strip_ansi(text):
 
 
 def _run_task(task):
-    """Worker thread: run the subprocess and retain a bounded output history."""
+    """Worker thread: run the subprocess and push output lines to the queue."""
     task.status = "running"
     try:
         if task.stop_requested:
@@ -404,7 +383,8 @@ def _run_task(task):
         task.job_handle = _attach_kill_job(task.process)
         for line in iter(task.process.stdout.readline, ""):
             clean = strip_ansi(line).rstrip("\n")
-            task.add_line(clean)
+            task.lines.append(clean)
+            task.output_queue.put(("line", clean))
         task.process.wait()
         task.exit_code = task.process.returncode
         if task.stop_requested:
@@ -415,15 +395,18 @@ def _run_task(task):
             task.result = task.on_success()
             if isinstance(task.result, dict) and task.result.get("message"):
                 message = str(task.result["message"])
-                task.add_line(message)
+                task.lines.append(message)
+                task.output_queue.put(("line", message))
     except FileNotFoundError:
         msg = f"[Error] tdl executable not found: {task.command[0]}"
-        task.add_line(msg)
+        task.lines.append(msg)
+        task.output_queue.put(("line", msg))
         task.status = "error"
         task.exit_code = -1
     except Exception as e:
         msg = f"[Error] {e}"
-        task.add_line(msg)
+        task.lines.append(msg)
+        task.output_queue.put(("line", msg))
         task.status = "error"
         task.exit_code = -1
     finally:
@@ -437,10 +420,12 @@ def _run_task(task):
                     task.result = finish_result
                 if isinstance(finish_result, dict) and finish_result.get("message"):
                     message = str(finish_result["message"])
-                    task.add_line(message)
+                    task.lines.append(message)
+                    task.output_queue.put(("line", message))
             except Exception as exc:
-                task.add_line(f"[下载记录] 回填失败：{exc}")
-        task.finished.set()
+                task.lines.append(f"[下载记录] 回填失败：{exc}")
+                task.output_queue.put(("line", task.lines[-1]))
+        task.output_queue.put(("end", {"status": task.status, "exit_code": task.exit_code}))
         for path in task.cleanup_paths:
             try:
                 Path(path).unlink(missing_ok=True)
@@ -456,7 +441,6 @@ def create_task(
     on_success=None,
     initial_lines=None,
     on_finish=None,
-    max_lines=None,
 ):
     task_id = uuid.uuid4().hex[:12]
     task = Task(
@@ -468,7 +452,6 @@ def create_task(
         on_success,
         initial_lines,
         on_finish,
-        max_lines,
     )
     with tasks_lock:
         active = next((t for t in tasks.values() if t.status in ("pending", "running")), None)
@@ -488,7 +471,6 @@ def create_completed_task(command, label="", lines=None, result=None):
     task.exit_code = 0
     task.end_time = time.time()
     task.result = result
-    task.finished.set()
     with tasks_lock:
         active = next((t for t in tasks.values() if t.status in ("pending", "running")), None)
         if active:
@@ -1140,7 +1122,6 @@ def create_download_task(cfg, body):
         cleanup_paths,
         initial_lines=initial_lines,
         on_finish=finalize_download if records else None,
-        max_lines=DOWNLOAD_TASK_MAX_LINES,
     )
     if error:
         for path in cleanup_paths:
@@ -1404,7 +1385,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "status": t.status,
                         "exit_code": t.exit_code,
                         "command": t.command,
-                        "lines": t.output_count(),
+                        "lines": len(t.lines),
                     }
                     for t in tasks.values()
                 ]
@@ -1418,7 +1399,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not task:
                 self._send_json({"error": "task not found"}, 404)
                 return
-            lines_dropped, lines = task.output_snapshot()
             self._send_json(
                 {
                     "id": task.id,
@@ -1426,8 +1406,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "status": task.status,
                     "exit_code": task.exit_code,
                     "command": task.command,
-                    "lines": lines,
-                    "lines_dropped": lines_dropped,
+                    "lines": task.lines,
                     "result": task.result,
                 }
             )
@@ -1599,39 +1578,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        cursor = 0
+        idx = 0
         last_keepalive = time.time()
         while True:
             try:
-                lines_dropped, lines = task.output_snapshot()
-                available_end = lines_dropped + len(lines)
-                if cursor < lines_dropped:
-                    skipped = lines_dropped - cursor
-                    notice = json.dumps(
-                        {
-                            "type": "line",
-                            "data": f"[控制台] 为避免页面卡顿，已省略较早的 {skipped} 行输出。",
-                        },
-                        ensure_ascii=False,
+                while idx < len(task.lines):
+                    payload = json.dumps(
+                        {"type": "line", "data": task.lines[idx]}, ensure_ascii=False
                     )
-                    self.wfile.write(f"data: {notice}\n\n".encode("utf-8"))
-                    cursor = lines_dropped
-                if cursor < available_end:
-                    start = cursor - lines_dropped
-                    pending = lines[start:]
-                    for offset in range(0, len(pending), SSE_BATCH_LINES):
-                        payload = json.dumps(
-                            {
-                                "type": "lines",
-                                "data": pending[offset:offset + SSE_BATCH_LINES],
-                            },
-                            ensure_ascii=False,
-                        )
-                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                    cursor += len(pending)
-                    self.wfile.flush()
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    idx += 1
+                self.wfile.flush()
 
-                if task.finished.is_set() and cursor >= available_end:
+                if task.status in ("done", "error", "stopped") and idx >= len(task.lines):
                     payload = json.dumps(
                         {"type": "end", "status": task.status, "exit_code": task.exit_code},
                         ensure_ascii=False,
@@ -1645,6 +1604,56 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
                     last_keepalive = time.time()
                 time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                break
+        return
+
+        # replay existing lines
+        idx = 0
+        while idx < len(task.lines):
+            line = task.lines[idx]
+            payload = json.dumps({"type": "line", "data": line}, ensure_ascii=False)
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+            idx += 1
+        self.wfile.flush()
+
+        # stream new output
+        while True:
+            if task.status in ("done", "error", "stopped") and task.output_queue.empty():
+                payload = json.dumps(
+                    {"type": "end", "status": task.status, "exit_code": task.exit_code},
+                    ensure_ascii=False,
+                )
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                break
+            try:
+                item = task.output_queue.get(timeout=1)
+                if item[0] == "line":
+                    payload = json.dumps(
+                        {"type": "line", "data": item[1]}, ensure_ascii=False
+                    )
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                elif item[0] == "end":
+                    payload = json.dumps(
+                        {
+                            "type": "end",
+                            "status": item[1]["status"],
+                            "exit_code": item[1]["exit_code"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    break
+                self.wfile.flush()
+            except queue.Empty:
+                # keepalive
+                try:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    break
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 break
 
