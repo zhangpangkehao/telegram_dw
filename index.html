@@ -120,6 +120,13 @@ tr.selected td { background: var(--accent-soft); }
 .line.info { color: var(--accent); }
 .line.cmd { color: var(--warn); font-style: italic; }
 .line.system { color: var(--dim); }
+.dl-progress { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 7px 13px; border-bottom: 1px solid var(--border); background: #ffffff; font-size: 12px; }
+.dl-progress-info { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dl-progress-track { flex: 1; min-width: 0; height: 6px; background: #e8eef6; border-radius: 3px; overflow: hidden; }
+.dl-progress-fill { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .25s ease; }
+.dl-progress-fill.done { background: var(--ok); }
+.dl-progress-fill.indeterminate { width: 28%; animation: dl-progress-slide 1.4s ease-in-out infinite; }
+@keyframes dl-progress-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(360%); } }
 .console-input { display: flex; gap: 6px; padding: 7px 12px; border-top: 1px solid var(--border); background: #f8fafc; }
 .console-input input { font-family: var(--mono); font-size: 12px; }
 .toast { position: fixed; right: 16px; top: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; z-index: 99; max-width: 360px; }
@@ -383,6 +390,10 @@ tr.selected td { background: var(--accent-soft); }
       <div>控制台 <span id="console-task-label" style="color:var(--accent);"></span></div>
       <div class="console-actions"><button onclick="clearConsole()">清空</button><button onclick="toggleConsole()">折叠</button></div>
     </div>
+    <div id="dl-progress" class="dl-progress" style="display:none;">
+      <div class="dl-progress-info"><span id="dl-progress-text">下载进度</span></div>
+      <div class="dl-progress-track"><div id="dl-progress-bar" class="dl-progress-fill"></div></div>
+    </div>
     <div id="console-body" class="console-body"><div class="line system">控制台已就绪。启动任务后会在这里显示输出。</div></div>
     <div class="console-input"><input id="console-input" placeholder="给正在运行的任务输入内容，然后按回车..." onkeydown="if(event.key==='Enter')sendInput()"><button class="btn small" onclick="sendInput()">发送</button><button class="btn small danger" onclick="stopTask()">停止</button></div>
   </section>
@@ -398,6 +409,16 @@ let previewData = [];
 let previewFilter = 'all';
 let consoleHeight = 230;
 let consoleExpandedHeight = 230;
+let consoleBuffer = [];
+let consoleTimer = null;
+const CONSOLE_MAX_LINES = 400;
+const CONSOLE_BUFFER_MAX = 800;
+let dlActive = false;
+let dlTotal = 0;
+let dlDone = 0;
+let dlSeen = new Set();
+let dlStartTime = 0;
+let dlTimer = null;
 
 function $(id) { return document.getElementById(id); }
 function val(id) { return $(id) ? $(id).value.trim() : ''; }
@@ -408,8 +429,35 @@ function toast(message, type) { const t = document.createElement('div'); t.class
 function toggleCollapse(id) { const el = $(id); if (el) el.classList.toggle('open'); }
 function getSeg(id) { const active = $(id).querySelector('button.active'); return active ? active.dataset.val : null; }
 
-function appendConsole(text, cls) { const div = document.createElement('div'); div.className = 'line ' + (cls || ''); div.textContent = text; $('console-body').appendChild(div); $('console-body').scrollTop = $('console-body').scrollHeight; }
-function clearConsole() { $('console-body').innerHTML = ''; }
+function appendConsole(text, cls) {
+  consoleBuffer.push({ text, cls });
+  if (consoleBuffer.length > CONSOLE_BUFFER_MAX) consoleBuffer.splice(0, consoleBuffer.length - CONSOLE_BUFFER_MAX);
+  if (!consoleTimer) consoleTimer = setTimeout(flushConsole, 50);
+}
+function flushConsole() {
+  consoleTimer = null;
+  const body = $('console-body');
+  if (!body) return;
+  const items = consoleBuffer;
+  consoleBuffer = [];
+  if (!items.length) return;
+  const frag = document.createDocumentFragment();
+  for (const item of items) {
+    const div = document.createElement('div');
+    div.className = 'line ' + (item.cls || '');
+    div.textContent = item.text;
+    frag.appendChild(div);
+  }
+  body.appendChild(frag);
+  while (body.children.length > CONSOLE_MAX_LINES) body.removeChild(body.firstChild);
+  body.scrollTop = body.scrollHeight;
+}
+function clearConsole() {
+  if (consoleTimer) { clearTimeout(consoleTimer); consoleTimer = null; }
+  consoleBuffer = [];
+  const body = $('console-body');
+  if (body) body.innerHTML = '';
+}
 function applyConsoleHeight(height) { const max = Math.max(120, Math.floor(window.innerHeight * .72)); consoleHeight = Math.max(36, Math.min(max, Math.round(height))); document.querySelector('.app').style.setProperty('--console-height', consoleHeight + 'px'); }
 function toggleConsole() { const collapsed = $('console').classList.toggle('collapsed'); if (collapsed) { if (consoleHeight > 36) consoleExpandedHeight = consoleHeight; applyConsoleHeight(36); } else { applyConsoleHeight(consoleExpandedHeight || 230); } }
 function setupConsoleResize() { const app = document.querySelector('.app'); const handle = $('console-resizer'); let startY = 0; let startHeight = 0; const beginResize = clientY => { if ($('console').classList.contains('collapsed')) { $('console').classList.remove('collapsed'); applyConsoleHeight(consoleExpandedHeight || 230); } startY = clientY; startHeight = consoleHeight; app.classList.add('resizing'); }; const moveResize = clientY => { if (!app.classList.contains('resizing')) return; applyConsoleHeight(startHeight + startY - clientY); consoleExpandedHeight = consoleHeight; }; const stopResize = () => { if (!app.classList.contains('resizing')) return; app.classList.remove('resizing'); localStorage.setItem('tdl-console-height', String(consoleExpandedHeight)); }; handle.addEventListener('mousedown', event => { beginResize(event.clientY); event.preventDefault(); }); window.addEventListener('mousemove', event => moveResize(event.clientY)); window.addEventListener('mouseup', stopResize); handle.addEventListener('touchstart', event => { beginResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchmove', event => { if (!app.classList.contains('resizing')) return; moveResize(event.touches[0].clientY); event.preventDefault(); }, { passive: false }); window.addEventListener('touchend', stopResize); const saved = Number(localStorage.getItem('tdl-console-height')); applyConsoleHeight(Number.isFinite(saved) && saved >= 80 ? saved : 230); consoleExpandedHeight = consoleHeight; window.addEventListener('resize', () => applyConsoleHeight($('console').classList.contains('collapsed') ? 36 : consoleExpandedHeight)); }
@@ -450,6 +498,75 @@ async function loadVersion() { try { const r = await fetch('/api/version'); cons
 async function loadDownloadHistory() { try { const r = await fetch('/api/download-history'); const data = await r.json(); if ($('dl-history-status')) $('dl-history-status').textContent = '已记录 ' + (data.count || 0) + ' 个 Telegram 文件。记录独立于下载目录，不会因文件被剪切而丢失。'; } catch { if ($('dl-history-status')) $('dl-history-status').textContent = '下载记录读取失败'; } }
 async function clearDownloadHistory() { if (!confirm('确定清空全部下载记录吗？清空后再次下载同一份 JSON 会从头开始。')) return; const r = await fetch('/api/download-history/clear', { method: 'POST' }); const data = await r.json(); if (!data.ok) return toast(data.error || '清空下载记录失败', 'error'); await loadDownloadHistory(); toast('下载记录已清空', 'success'); }
 
+function isCompletedFileLine(text) {
+  const s = String(text || '').trim();
+  if (/^\d+\s*->\s*\S/.test(s)) return true;
+  if (/copy file\s+.+\s+to\s+\S+/i.test(s)) return true;
+  return false;
+}
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return (m > 0 ? m + ' 分 ' : '') + s + ' 秒';
+}
+function beginDownloadProgress(total) {
+  dlActive = true;
+  dlTotal = total || 0;
+  dlDone = 0;
+  dlSeen = new Set();
+  dlStartTime = Date.now();
+  const p = $('dl-progress');
+  const bar = $('dl-progress-bar');
+  if (p) p.style.display = 'flex';
+  if (bar) { bar.className = 'dl-progress-fill'; bar.style.width = '0%'; bar.classList.remove('indeterminate', 'done'); }
+  if (dlTimer) clearInterval(dlTimer);
+  dlTimer = setInterval(updateDownloadProgress, 1000);
+  updateDownloadProgress();
+}
+function updateDownloadProgress() {
+  if (!dlActive) return;
+  const text = $('dl-progress-text');
+  const bar = $('dl-progress-bar');
+  if (!text || !bar) return;
+  const elapsedMs = dlStartTime ? Date.now() - dlStartTime : 0;
+  const elapsed = elapsedMs > 0 ? formatElapsed(elapsedMs) : '';
+  let rate = '';
+  if (dlDone > 0 && elapsedMs > 2000) {
+    const perMin = dlDone / (elapsedMs / 60000);
+    rate = '，约 ' + (perMin >= 10 ? Math.round(perMin) : perMin.toFixed(1)) + ' 个/分';
+  }
+  if (dlTotal > 0) {
+    const pct = Math.min(100, Math.round((dlDone / dlTotal) * 100));
+    bar.style.width = pct + '%';
+    bar.classList.remove('indeterminate');
+    text.textContent = '下载进度 ' + dlDone + ' / ' + dlTotal + '（' + pct + '%）' + (elapsed ? '，用时 ' + elapsed : '') + rate;
+  } else {
+    if (dlDone > 0) { bar.classList.add('indeterminate'); bar.style.width = '28%'; }
+    else { bar.classList.remove('indeterminate'); bar.style.width = '0%'; }
+    text.textContent = '已下载 ' + dlDone + ' 个文件' + (elapsed ? '，用时 ' + elapsed : '') + rate;
+  }
+}
+function finishDownloadProgress(status) {
+  if (!dlActive) return;
+  if (dlTimer) { clearInterval(dlTimer); dlTimer = null; }
+  if (status === 'done' && dlTotal > 0) dlDone = Math.max(dlDone, dlTotal);
+  const text = $('dl-progress-text');
+  const bar = $('dl-progress-bar');
+  if (text) {
+    const elapsed = dlStartTime ? formatElapsed(Date.now() - dlStartTime) : '';
+    text.textContent = dlTotal > 0
+      ? (status === 'done' ? '下载完成：共 ' + dlTotal + ' 个，用时 ' + elapsed : '下载终止：已下载 ' + dlDone + ' / ' + dlTotal + ' 个')
+      : (status === 'done' ? '下载完成：共 ' + dlDone + ' 个文件' : '下载终止：已下载 ' + dlDone + ' 个文件');
+  }
+  if (bar) {
+    bar.classList.remove('indeterminate');
+    if (status === 'done') { bar.style.width = '100%'; bar.classList.add('done'); }
+    else if (dlTotal > 0) { bar.style.width = Math.min(100, Math.round((dlDone / dlTotal) * 100)) + '%'; bar.classList.remove('done'); }
+  }
+  dlActive = false;
+}
+
 function connectStream(taskId, onEnd) {
   if (currentEventSource) currentEventSource.close();
   currentTaskId = taskId;
@@ -458,16 +575,23 @@ function connectStream(taskId, onEnd) {
   currentEventSource.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === 'line') {
-      const lower = String(data.data).toLowerCase();
+      const raw = String(data.data);
+      const lower = raw.toLowerCase();
       if (lower.includes('not authorized') || lower.includes('please login first')) {
         sessionRejected = true;
         $('login-dot').className = 'dot';
         $('login-text').textContent = '未登录';
       }
+      if (dlActive && isCompletedFileLine(raw)) {
+        const key = raw.trim();
+        if (!dlSeen.has(key)) { dlSeen.add(key); dlDone++; updateDownloadProgress(); }
+        return;
+      }
       const cls = lower.includes('error') || lower.includes('panic') || lower.includes('fatal') ? 'error' : (lower.includes('complete') || lower.includes('success') || lower.includes('done') ? 'success' : '');
-      appendConsole(data.data, cls);
+      appendConsole(raw, cls);
     }
     if (data.type === 'end') {
+      finishDownloadProgress(data.status);
       appendConsole('[任务结束：' + data.status + '，退出码 ' + data.exit_code + ']', 'system');
       setTaskStatus(false);
       currentEventSource.close();
@@ -476,11 +600,11 @@ function connectStream(taskId, onEnd) {
       if (onEnd) onEnd(data, taskId);
       if (!sessionRejected) checkLoginStatus();
     }
-    if (data.type === 'error') appendConsole('[错误：' + (data.message || '未知') + ']', 'error');
+    if (data.type === 'error') { finishDownloadProgress('error'); appendConsole('[错误：' + (data.message || '未知') + ']', 'error'); }
   };
 }
 
-async function startTask(endpoint, body, label, onEnd) { const r = await fetch('/api/' + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!data.task_id) { const message = data.error || '启动任务失败'; appendConsole('[启动失败：' + message + ']', 'error'); toast(message, 'error'); return null; } appendConsole('$ ' + (data.command || []).join(' '), 'cmd'); if (data.history && data.history.enabled) appendConsole('[下载记录] 已跳过 ' + data.history.skipped + ' 条，待处理 ' + data.history.pending + ' 条。', 'info'); setTaskStatus(true, label); connectStream(data.task_id, result => { loadDownloadHistory(); if (onEnd) onEnd(result, data.task_id); }); return data.task_id; }
+async function startTask(endpoint, body, label, onEnd) { const r = await fetch('/api/' + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!data.task_id) { const message = data.error || '启动任务失败'; appendConsole('[启动失败：' + message + ']', 'error'); toast(message, 'error'); return null; } if (endpoint === 'download') beginDownloadProgress(data.history ? data.history.pending : 0); appendConsole('$ ' + (data.command || []).join(' '), 'cmd'); if (data.history && data.history.enabled) appendConsole('[下载记录] 已跳过 ' + data.history.skipped + ' 条，待处理 ' + data.history.pending + ' 条。', 'info'); setTaskStatus(true, label); connectStream(data.task_id, result => { loadDownloadHistory(); if (onEnd) onEnd(result, data.task_id); }); return data.task_id; }
 async function sendInput() { if (!currentTaskId || !val('console-input')) return; await fetch('/api/task/' + currentTaskId + '/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: val('console-input') }) }); appendConsole('> ' + val('console-input'), 'info'); setVal('console-input', ''); }
 async function stopTask() { if (!currentTaskId) return toast('当前没有正在运行的任务', 'warning'); try { const r = await fetch('/api/task/' + currentTaskId + '/stop', { method: 'POST' }); const data = await r.json(); toast(data.ok ? (data.message || '任务已停止') : (data.error || data.message || '停止失败'), data.ok ? 'warning' : 'error'); } catch { toast('无法连接到后台服务', 'error'); } }
 
