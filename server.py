@@ -19,6 +19,8 @@ import queue
 import time
 import uuid
 import webbrowser
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -111,6 +113,10 @@ tasks = {}
 tasks_lock = threading.Lock()
 preview_files = {}
 preview_files_lock = threading.Lock()
+preview_streams = {}
+preview_streams_lock = threading.Lock()
+preview_serve_sessions = {}
+preview_serve_lock = threading.Lock()
 download_history_lock = threading.Lock()
 _single_instance_handle = None
 
@@ -442,6 +448,8 @@ def create_task(
     initial_lines=None,
     on_finish=None,
 ):
+    # Online preview servers keep tdl's storage open; stop them before a normal task.
+    stop_preview_servers()
     task_id = uuid.uuid4().hex[:12]
     task = Task(
         task_id,
@@ -465,6 +473,7 @@ def create_task(
 
 def create_completed_task(command, label="", lines=None, result=None):
     """Create an already-completed task so the browser can consume normal SSE."""
+    stop_preview_servers()
     task_id = uuid.uuid4().hex[:12]
     task = Task(task_id, command, {}, label, initial_lines=lines)
     task.status = "done"
@@ -1147,28 +1156,166 @@ def _media_kind(filename):
     return "file", mime
 
 
-def _find_downloaded_files(filenames, roots):
-    wanted = {Path(name).name.casefold() for name in filenames if name}
-    found = {}
-    visited = set()
-    for root in roots:
-        if not root.exists() or not root.is_dir():
-            continue
+def _preview_file_index(roots):
+    """Index local files by their original name and tdl's message-based name."""
+    exact = {}
+    by_message = {}
+    by_dialog_message = {}
+    visited_roots = set()
+    for value in roots:
+        root = _resolve_user_path(value)
         root_key = str(root).casefold()
-        if root_key in visited:
+        if root_key in visited_roots:
             continue
-        visited.add(root_key)
-        for current, _, files in os.walk(root):
-            for filename in files:
-                key = filename.casefold()
-                if key in wanted and key not in found:
-                    found[key] = (Path(current) / filename).resolve()
-            if len(found) == len(wanted):
-                return found
-    return found
+        visited_roots.add(root_key)
+        source_exact, source_by_message, source_by_dialog_message = _download_file_index(root)
+        for key, paths in source_exact.items():
+            exact.setdefault(key, []).extend(paths)
+        for key, paths in source_by_message.items():
+            by_message.setdefault(key, []).extend(paths)
+        for key, paths in source_by_dialog_message.items():
+            by_dialog_message.setdefault(key, []).extend(paths)
+    return exact, by_message, by_dialog_message
 
 
-def build_preview(export_file, download_dir):
+def _match_preview_file(item, index):
+    exact, by_message, by_dialog_message = index
+    filename = Path(str(item.get("filename") or "")).name.casefold()
+    if not filename:
+        return None
+    candidates = list(exact.get(filename, []))
+    if not candidates:
+        message_id = str(item.get("message_id") or "")
+        chat_id = str(item.get("chat_id") or "")
+        if message_id and chat_id:
+            candidates = list(by_dialog_message.get((chat_id, message_id), []))
+        if not candidates and message_id:
+            candidates = list(by_message.get(message_id, []))
+    if len(candidates) > 1:
+        extension = Path(filename).suffix.casefold()
+        same_extension = [path for path in candidates if path.suffix.casefold() == extension]
+        if same_extension:
+            candidates = same_extension
+    return candidates[0] if candidates else None
+
+
+def _find_downloaded_files(filenames, roots):
+    """Find files using their exact names (kept for callers outside preview)."""
+    wanted = {Path(name).name.casefold() for name in filenames if name}
+    exact, _, _ = _preview_file_index(roots)
+    return {name: paths[0] for name in wanted if (paths := exact.get(name))}
+
+
+def _preview_stream_token(export_path, item):
+    stable = "|".join(
+        [
+            str(export_path),
+            str(item.get("chat_id") or ""),
+            str(item.get("message_id") or ""),
+            str(item.get("filename") or ""),
+        ]
+    )
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
+
+
+def _register_preview_stream(export_path, item):
+    token = _preview_stream_token(export_path, item)
+    with preview_streams_lock:
+        preview_streams[token] = {
+            "export_path": export_path,
+            "chat_id": item.get("chat_id"),
+            "message_id": item.get("message_id"),
+            "filename": Path(str(item.get("filename") or "media")).name,
+            "mime": item.get("mime") or "application/octet-stream",
+        }
+    return token
+
+
+def _terminate_preview_process(process):
+    if not process or process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def stop_preview_servers():
+    with preview_serve_lock:
+        sessions = list(preview_serve_sessions.values())
+        preview_serve_sessions.clear()
+    for session in sessions:
+        _terminate_preview_process(session.get("process"))
+
+
+def _ensure_preview_server(export_path, cfg):
+    key = str(export_path).casefold()
+    with preview_serve_lock:
+        existing = preview_serve_sessions.get(key)
+        if existing and existing["process"].poll() is None:
+            return existing["port"]
+        if existing:
+            preview_serve_sessions.pop(key, None)
+
+        port = find_port("127.0.0.1", 18888)
+        command = _tdl(cfg) + [
+            "download",
+            "--serve",
+            "-f",
+            str(export_path),
+            "--port",
+            str(port),
+        ] + _global_args(cfg)
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                env=build_env(cfg),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"无法启动在线预览服务：{exc}") from exc
+        preview_serve_sessions[key] = {
+            "process": process,
+            "port": port,
+            "export_path": export_path,
+        }
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if process.poll() is not None:
+            with preview_serve_lock:
+                preview_serve_sessions.pop(key, None)
+            raise RuntimeError("在线预览服务启动失败，请检查 tdl 登录状态和日志")
+        try:
+            import socket
+
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return port
+        except OSError:
+            time.sleep(0.08)
+    _terminate_preview_process(process)
+    with preview_serve_lock:
+        preview_serve_sessions.pop(key, None)
+    raise RuntimeError("在线预览服务启动超时")
+
+
+def build_preview(export_file, download_dir, cfg=None):
     export_path = _resolve_user_path(export_file)
     if not export_path.is_file():
         raise FileNotFoundError(f"Export JSON not found: {export_path}")
@@ -1180,7 +1327,6 @@ def build_preview(export_file, download_dir):
 
     history_items = load_download_history()["items"]
     items = []
-    filenames = []
     for group_index, group in enumerate(groups):
         chat_id = group.get("id") or group.get("chat_id") or group.get("dialog_id")
         for message_index, message in enumerate(group["messages"]):
@@ -1189,7 +1335,6 @@ def build_preview(export_file, download_dir):
             filename = _message_file(message)
             if not filename:
                 continue
-            filenames.append(filename)
             kind, mime = _media_kind(filename)
             items.append({
                 "chat_id": chat_id,
@@ -1204,11 +1349,22 @@ def build_preview(export_file, download_dir):
             })
 
     dl_path = _resolve_user_path(download_dir or "downloads")
-    found = _find_downloaded_files(filenames, [dl_path, export_path.parent])
+    file_index = _preview_file_index([dl_path, export_path.parent])
+    preview_cfg = cfg or load_config()
+    tdl_available = Path(normalize_tdl_path(preview_cfg.get("tdl_path"))).is_file()
     for item in items:
-        local_path = found.get(Path(item["filename"]).name.casefold())
+        local_path = _match_preview_file(item, file_index)
         if not local_path:
             item["downloaded"] = False
+            if tdl_available and item["kind"] in {"image", "video", "audio"}:
+                token = _register_preview_stream(export_path, item)
+                item.update(
+                    {
+                        "previewable": True,
+                        "media_url": f"/api/preview/stream/{token}",
+                        "download_url": f"/api/preview/stream/{token}?download=1",
+                    }
+                )
             continue
         token = hashlib.sha256(str(local_path).encode("utf-8")).hexdigest()[:24]
         with preview_files_lock:
@@ -1366,6 +1522,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_media(media_path, parsed.query)
             return
 
+        if path.startswith("/api/preview/stream/"):
+            token = path.rsplit("/", 1)[-1]
+            self._serve_preview_stream(token, parsed.query, cfg)
+            return
+
         if path == "/api/file":
             requested = parse_qs(parsed.query).get("path", [""])[0]
             file_path = _resolve_user_path(requested)
@@ -1434,7 +1595,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/preview":
             body = self._read_body()
             try:
-                result = build_preview(body.get("export_file"), body.get("download_dir") or cfg.get("download_dir"))
+                result = build_preview(
+                    body.get("export_file"),
+                    body.get("download_dir") or cfg.get("download_dir"),
+                    cfg,
+                )
                 self._send_json({"ok": True, **result})
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 400)
@@ -1560,6 +1725,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    def _serve_preview_stream(self, token, query, cfg):
+        with preview_streams_lock:
+            entry = preview_streams.get(token)
+        if not entry:
+            self._send_json({"error": "preview stream not found"}, 404)
+            return
+
+        try:
+            port = _ensure_preview_server(entry["export_path"], cfg)
+            peer = quote(str(entry.get("chat_id") or ""), safe="")
+            message = quote(str(entry.get("message_id") or ""), safe="")
+            upstream = f"http://127.0.0.1:{port}/{peer}/{message}"
+            headers = {}
+            range_header = self.headers.get("Range")
+            if range_header:
+                headers["Range"] = range_header
+            request = urllib.request.Request(upstream, headers=headers)
+            response = urllib.request.urlopen(request, timeout=60)
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
+            self._send_json({"error": f"在线预览失败：{exc}"}, 502)
+            return
+
+        try:
+            status = getattr(response, "status", None) or response.getcode() or 200
+            self.send_response(status)
+            self.send_header("Content-Type", response.headers.get("Content-Type") or entry["mime"])
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                self.send_header("Content-Length", content_length)
+            accept_ranges = response.headers.get("Accept-Ranges")
+            if accept_ranges:
+                self.send_header("Accept-Ranges", accept_ranges)
+            content_range = response.headers.get("Content-Range")
+            if content_range:
+                self.send_header("Content-Range", content_range)
+            if parse_qs(query).get("download", [""])[0] == "1":
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename*=UTF-8''{quote(entry['filename'])}",
+                )
+            self.send_header("Cache-Control", "private, max-age=60")
+            self.end_headers()
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        finally:
+            response.close()
 
     # -- SSE ----------------------------------------------------------------
 
@@ -1717,12 +1934,14 @@ def main():
 
     atexit.register(remove_instance_info)
     atexit.register(stop_all_tasks)
+    atexit.register(stop_preview_servers)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
         stop_all_tasks()
+        stop_preview_servers()
         server.server_close()
         remove_instance_info()
     return 0

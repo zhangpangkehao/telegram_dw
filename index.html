@@ -215,7 +215,7 @@ tr.selected td { background: var(--accent-soft); }
 
     <section id="tab-preview" class="tab">
       <div class="title">聊天记录预览</div>
-      <div class="desc">加载 tdl 导出的 JSON，图片和视频可直接预览；点击下载按钮保存到本地。</div>
+      <div class="desc">加载 tdl 导出的 JSON，图片可在线预览，视频点击后在线播放；点击下载按钮才会保存到本地。</div>
       <div class="card">
         <div class="preview-toolbar">
           <div class="field"><label>导出 JSON 文件</label><input id="preview-export" class="mono" placeholder="tdl-export.json"></div>
@@ -491,7 +491,7 @@ function toggleQuickType() { const type = val('dl-quick-type'); $('dl-quick-date
 function toggleExpType() { const type = val('exp-type'); $('exp-time-opts').style.display = type === 'time' ? '' : 'none'; $('exp-id-opts').style.display = type === 'id' ? '' : 'none'; $('exp-last-opts').style.display = type === 'last' ? '' : 'none'; }
 
 async function loadConfig() { const r = await fetch('/api/config'); config = await r.json(); fillSettings(); }
-function fillSettings() { setVal('cfg-tdl-path', config.tdl_path || ''); setVal('cfg-tdl-home', config.tdl_home || ''); setVal('cfg-namespace', config.namespace || 'default'); setVal('cfg-proxy', config.proxy || ''); setVal('cfg-pool', config.pool || 8); setVal('cfg-limit', config.limit || 2); setVal('cfg-threads', config.threads || 4); setVal('cfg-download-dir', config.download_dir || 'downloads'); setVal('cfg-port', config.port || 8765); setVal('dl-dir', config.download_dir || 'downloads'); setVal('dl-limit', config.limit || 2); setVal('dl-threads', config.threads || 4); setVal('preview-dir', config.download_dir || 'downloads'); }
+function fillSettings() { setVal('cfg-tdl-path', config.tdl_path || ''); setVal('cfg-tdl-home', config.tdl_home || ''); setVal('cfg-namespace', config.namespace || 'default'); setVal('cfg-proxy', config.proxy || ''); setVal('cfg-pool', config.pool || 8); setVal('cfg-limit', config.limit || 2); setVal('cfg-threads', config.threads || 4); setVal('cfg-download-dir', config.download_dir || 'downloads'); setVal('cfg-port', config.port || 8765); setVal('dl-dir', config.download_dir || 'downloads'); setVal('dl-limit', config.limit || 2); setVal('dl-threads', config.threads || 4); setVal('preview-export', config.preview_export || 'tdl-export.json'); setVal('preview-dir', config.download_dir || 'downloads'); }
 async function saveSettings() { const body = { tdl_path: val('cfg-tdl-path'), tdl_home: val('cfg-tdl-home'), namespace: val('cfg-namespace'), proxy: val('cfg-proxy'), pool: Number(val('cfg-pool')) || 8, limit: Number(val('cfg-limit')) || 2, threads: Number(val('cfg-threads')) || 4, download_dir: val('cfg-download-dir') || 'downloads', port: Number(val('cfg-port')) || 8765 }; const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); config = data.config || body; fillSettings(); $('settings-saved').style.display = 'inline'; setTimeout(() => $('settings-saved').style.display = 'none', 1800); toast('设置已保存', 'success'); checkLoginStatus(); }
 async function checkLoginStatus() { try { const r = await fetch('/api/login-status'); const data = await r.json(); $('login-dot').className = 'dot ' + (data.logged_in ? 'ok' : ''); $('login-text').textContent = data.logged_in ? '已登录' : '未登录'; } catch { $('login-text').textContent = '未知'; } }
 async function loadVersion() { try { const r = await fetch('/api/version'); const data = await r.json(); $('version-info').textContent = data.version || '未知'; } catch { $('version-info').textContent = '加载版本失败'; } }
@@ -636,18 +636,20 @@ function renderPreview() {
   if (!items.length) { grid.innerHTML = '<div class="preview-empty">没有匹配的文件</div>'; return; }
   items.forEach(item => {
     const card = document.createElement('article'); card.className = 'preview-item';
-    const thumb = document.createElement('button'); thumb.className = 'preview-thumb'; thumb.title = item.downloaded ? '打开预览' : '下载文件';
-    if (item.downloaded && (item.kind === 'image' || item.kind === 'video')) {
-      if (item.kind === 'image') { const img = document.createElement('img'); img.src = item.media_url; img.alt = item.filename; thumb.appendChild(img); }
-      else { const video = document.createElement('video'); video.src = item.media_url; video.muted = true; video.preload = 'metadata'; thumb.appendChild(video); }
+    const canPreview = Boolean(item.media_url) && ['image', 'video', 'audio'].includes(item.kind);
+    const thumb = document.createElement('button'); thumb.className = 'preview-thumb'; thumb.title = canPreview ? '打开预览' : '下载文件';
+    if (canPreview) {
+      if (item.kind === 'image') { const img = document.createElement('img'); img.src = item.media_url; img.alt = item.filename; img.loading = 'lazy'; thumb.appendChild(img); }
+      else if (item.kind === 'video' && item.downloaded) { const video = document.createElement('video'); video.src = item.media_url; video.muted = true; video.playsInline = true; video.preload = 'metadata'; thumb.appendChild(video); }
+      else { thumb.innerHTML = '<span class="preview-file-icon">' + esc(item.kind === 'video' ? 'VIDEO' : 'AUDIO') + '</span>'; }
       thumb.onclick = () => openPreviewModal(item);
     } else { thumb.innerHTML = '<span class="preview-file-icon">' + esc(item.kind === 'file' ? 'FILE' : item.kind.toUpperCase()) + '</span>'; if (item.downloaded) thumb.onclick = () => window.open(item.media_url, '_blank'); }
     const meta = document.createElement('div'); meta.className = 'preview-meta';
-    const localState = item.downloaded ? formatBytes(item.size) : (item.history_recorded ? '已下载过（文件已移走）' : '未下载');
+    const localState = item.downloaded ? formatBytes(item.size) : (item.previewable ? '未下载（可在线预览）' : (item.history_recorded ? '已下载过（文件已移走）' : '未下载'));
     meta.innerHTML = '<div class="preview-name" title="' + esc(item.filename) + '">' + esc(item.filename) + '</div><div class="preview-sub"><span>' + previewLabel(item.kind) + '</span><span>' + localState + '</span></div>';
     const actions = document.createElement('div'); actions.className = 'preview-item-actions';
     if (item.downloaded) { const download = document.createElement('a'); download.className = 'btn secondary small'; download.href = item.download_url; download.textContent = '下载'; download.setAttribute('download', item.filename); actions.appendChild(download); }
-    else { const button = document.createElement('button'); button.className = 'btn small'; button.textContent = item.history_recorded ? '重新下载' : '下载'; button.onclick = () => downloadPreviewItem(item, button); actions.appendChild(button); thumb.onclick = () => downloadPreviewItem(item, button); }
+    else { const button = document.createElement('button'); button.className = 'btn small'; button.textContent = item.history_recorded ? '重新下载' : '下载'; button.onclick = () => downloadPreviewItem(item, button); actions.appendChild(button); if (!canPreview) thumb.onclick = () => downloadPreviewItem(item, button); }
     meta.appendChild(actions); card.appendChild(thumb); card.appendChild(meta); grid.appendChild(card);
   });
 }
